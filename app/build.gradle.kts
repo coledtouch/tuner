@@ -30,8 +30,8 @@ android {
         applicationId = "ai.ciprari.tuner"
         minSdk = 23
         targetSdk = 35
-        versionCode = 12
-        versionName = "1.5.1"
+        versionCode = 13
+        versionName = "1.5.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

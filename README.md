@@ -1,6 +1,6 @@
 # Tuner
 
-IPTV player for Android TV and Google TV. Cable-style Live TV guide, live preview, movies, series, search, and themes. Version 1.5.1 expands two-channel Multi View to the full screen, with controls that hide while you watch. Fast saved-library startup, a True Black theme, personal Most Watched, labelled navigation, Favorites, unrestricted movie and series audio, native Android Picture-in-Picture, and the integrated Streaming tab remain available.
+IPTV player for Android TV and Google TV. Cable-style Live TV guide, live preview, movies, series, search, and themes. Version 1.5.2 expands two-channel Multi View to the full screen, with controls that hide while you watch. Fast saved-library startup, a True Black theme, personal Most Watched, labelled navigation, Favorites, unrestricted movie and series audio, native Android Picture-in-Picture, and the integrated Streaming tab remain available.
 
 The [Samsung Tizen TV app](tizen/README.md) provides Live TV, Movies, Series, Search, a black theme, and two-channel side-by-side or in-app Picture in Picture. It is built and signed separately from the Android APK using a Samsung TV certificate.
 
@@ -13,7 +13,7 @@ The [Samsung Tizen TV app](tizen/README.md) provides Live TV, Movies, Series, Se
 
 ```powershell
 adb connect 192.168.1.50:5555
-adb install -r .\Tuner-1.5.1.apk
+adb install -r .\Tuner-1.5.2.apk
 ```
 
 Accept the debugging prompt on the TV the first time. Tuner shows up in your Apps row.
@@ -75,7 +75,7 @@ Select **Picture-in-Picture** in the full-screen player's actions to keep the vi
 
 Tuner saves the finished channel lineup, movie and series libraries, provider Most Watched, and current guide in private storage. Reopening restores these directly, skipping repeated provider parsing, country filtering and duplicate cleanup. Fresh channel snapshots last two hours, provider Most Watched twenty minutes, and movie/series snapshots twelve hours. Older saved libraries remain usable during a background refresh. Current and upcoming guide listings restore first while the full three-day guide loads separately.
 
-Snapshots belong to the exact provider account and relevant format/market settings, and damaged snapshots are ignored. First setup or an edited provider still requires an initial download and preparation. Refresh preserves usable content; Clear cache removes both raw downloads and prepared snapshots.
+Snapshots belong to the exact provider account and relevant format/market settings, and damaged snapshots are ignored. First setup or an edited provider still requires an initial download and preparation. Refresh preserves usable content; Clear cache removes both raw downloads and prepared snapshots. Clearing runs in the background and invalidates queued snapshot saves so canceled loads cannot recreate the cleared catalogs.
 
 1. Your provider's XMLTV guide (or the EPG URL you set).
 2. Free regional guides from epgshare01.online for any channel still missing listings, matched by channel name. Pick regions in Settings > Guide. Defaults: US national and US sports.

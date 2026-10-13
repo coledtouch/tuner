@@ -63,11 +63,14 @@ import ai.ciprari.tuner.data.Repo
 import ai.ciprari.tuner.data.Source
 import ai.ciprari.tuner.data.SourceType
 import ai.ciprari.tuner.player.PlayerHolder
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun SettingsScreen(state: AppState) {
+    val scope = rememberCoroutineScope()
     val windowFocused = LocalWindowInfo.current.isWindowFocused
     val sources by Repo.prefs.sources.collectAsState()
     val activeId by Repo.prefs.activeId.collectAsState()
@@ -92,6 +95,7 @@ fun SettingsScreen(state: AppState) {
     // Settings values aren't flows; bump this to redraw after changing one.
     var rev by remember { mutableIntStateOf(0) }
     val first = remember { FocusRequester() }
+    var clearingCache by remember { mutableStateOf(false) }
 
     LaunchedEffect(state.restoreFocus, windowFocused) {
         if (state.restoreFocus && windowFocused && requestAttachedFocus(first)) state.restoreFocus = false
@@ -215,8 +219,21 @@ fun SettingsScreen(state: AppState) {
             }
             item {
                 SettingRow(
-                    "Clear cached data", "Frees storage. Everything downloads again on next load.",
-                    onClick = { Repo.clearCache(); Toasts.show("Cache cleared") },
+                    if (clearingCache) "Clearing cached data…" else "Clear cached data",
+                    "Frees storage. Everything downloads again on next load.",
+                    onClick = {
+                        if (!clearingCache) {
+                            clearingCache = true
+                            scope.launch {
+                                try {
+                                    withContext(Dispatchers.IO) { Repo.clearCache() }
+                                    Toasts.show("Cache cleared")
+                                } finally {
+                                    clearingCache = false
+                                }
+                            }
+                        }
+                    },
                 )
             }
             item {

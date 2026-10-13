@@ -166,9 +166,67 @@ class RepositorySnapshotTest {
             await { Repo.channels.value.any { it.key == "x:2" } }
             await { store.readLive(identity(source))?.value?.channels?.size == 2 }
             assertEquals(2, store.readLive(identity(source))!!.value.channels.size)
-            assertFalse(server.requests.any { "get_live_streams" in it })
+            assertFalse("Restoring hidden channels must use the valid raw catalogue", server.requests.any { "get_live_streams" in it })
             Repo.clearCache()
-            assertFalse(snapshotRoot.exists())
+            assertFalse("Clear Cache must remove the finished catalogue directory", snapshotRoot.exists())
+        }
+    }
+
+    @Test fun clearingCacheCannotBeUndoneByAnAlreadyQueuedGuideWrite() = runBlocking {
+        Fixture(block = true).use { server ->
+            val source = source(server)
+            Repo.prefs.saveSource(source); Repo.prefs.setActive(source.id)
+            seed(source)
+            val dir = File(cacheRoot, identity(source).source).apply { mkdirs() }
+            File(dir, "live_cats.json").writeText("""[{"category_id":"1","category_name":"US News"}]""")
+            File(dir, "live.json").writeText("""[{"stream_id":1,"name":"[US] CNN","category_id":"1"},{"stream_id":2,"name":"[US] MSNBC","category_id":"1"}]""")
+            val rawGuide = File(dir, "epg.xml").apply { writeText("<tv></tv>") }
+            Repo.load()
+            fun loadJob() = Repo::class.java.getDeclaredField("job").apply { isAccessible = true }.get(null) as Job
+            withTimeout(5_000) { loadJob().join() }
+            assertEquals(listOf(channel), Repo.channels.value)
+            assertTrue("The next guide refresh needs the held fixture response", rawGuide.delete())
+            Repo.restoreHiddenChannels()
+            val loading = loadJob()
+            await { Repo.channels.value.any { it.key == "x:2" } }
+            // The provider request starts only after the cached guide read completes.
+            // Hold its response while acquiring the write monitor, so a reader
+            // cannot accidentally satisfy the writer barrier below.
+            await { server.requests.any { "/guide.xml" in it } }
+
+            // Hold the actual file-write monitor after the restored guide is decoded.
+            // This makes cancellation race with a synchronous writer, without sleeps
+            // or production hooks, and covers the cache directory recreated in CI.
+            @Suppress("UNCHECKED_CAST")
+            val locks = CatalogSnapshots::class.java.getDeclaredField("locks").apply { isAccessible = true }.get(null) as Map<String, Any>
+            val writeLock = checkNotNull(locks[File(snapshotRoot, "${identity(source).live}-guide.bin").absolutePath])
+            val held = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val writerGate = Executors.newSingleThreadExecutor()
+            val clearing = Executors.newSingleThreadExecutor()
+            try {
+                writerGate.submit { synchronized(writeLock) { held.countDown(); release.await(5, TimeUnit.SECONDS) } }
+                assertTrue("The guide-write gate did not start", held.await(1, TimeUnit.SECONDS))
+                server.release.countDown()
+                await {
+                    Thread.getAllStackTraces().any { (thread, trace) ->
+                        thread.state == Thread.State.BLOCKED && trace.firstOrNull()?.let {
+                            it.className == CatalogSnapshots::class.java.name && it.methodName == "write"
+                        } == true
+                    }
+                }
+                val generation = Repo::class.java.getDeclaredField("generation").apply { isAccessible = true }
+                val beforeClear = generation.getLong(null)
+                val clear = clearing.submit { Repo.clearCache() }
+                await { generation.getLong(null) != beforeClear }
+                release.countDown()
+                withContext(Dispatchers.IO) { clear.get(5, TimeUnit.SECONDS) }
+                withTimeout(5_000) { loading.join() }
+                assertFalse("A cancelled guide writer recreated the cleared catalogue directory", snapshotRoot.exists())
+                assertEquals("Clearing cache must retain the usable restored lineup", 2, Repo.channels.value.size)
+            } finally {
+                release.countDown(); writerGate.shutdownNow(); clearing.shutdownNow()
+            }
         }
     }
 

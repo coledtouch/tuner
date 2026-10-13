@@ -37,6 +37,8 @@ object Repo {
     private lateinit var cacheRoot: File
     private lateinit var snapshots: CatalogSnapshots
     private lateinit var snapshotRoot: File
+    // Local disk writes and explicit removal share this lock; UI publication uses the Repo monitor.
+    private val snapshotWriteLock = Any()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var job: Job? = null
     @Volatile private var generation = 0L
@@ -176,7 +178,12 @@ object Repo {
     private fun cachedFile(file: File) = file.takeIf { it.isFile && it.length() > 0 }
     private fun storedAt(vararg files: File) = files.minOf { it.lastModified() }.coerceAtLeast(1)
     private fun fresh(at: Long, age: Long) = System.currentTimeMillis() - at < age
-    private fun saveSnapshot(write: () -> Unit) { runCatching(write) } // Disk exhaustion must not hide a usable catalogue.
+    private fun saveSnapshot(request: LoadRequest, write: () -> Unit) {
+        synchronized(snapshotWriteLock) {
+            // A writer may have waited for another file operation after its coroutine was cancelled.
+            if (current(request)) runCatching(write) // Disk exhaustion must not hide a usable catalogue.
+        }
+    }
 
     private fun restoreLive(request: LoadRequest, live: CatalogSnapshots.Live) {
         startupPhases["livePublish"] = "preparing"
@@ -276,7 +283,7 @@ object Repo {
                     val catalogue = ContentPolicy.movies(x.parseMovies(list), x.parseCategories(categories))
                     val cleaned = Cleanup.movies(catalogue.items)
                     commit(request) { movieCategories.value = catalogue.categories; movies.value = cleaned; vodStatus.value = LoadStatus.Ready }
-                    if (current(request)) saveSnapshot { snapshots.writeMovies(request.identity, ContentPolicy.Catalogue(cleaned, catalogue.categories), storedAt(list, categories)) }
+                    saveSnapshot(request) { snapshots.writeMovies(request.identity, ContentPolicy.Catalogue(cleaned, catalogue.categories), storedAt(list, categories)) }
                 }
                 var availableAt = cached?.storedAt
                 if (cached == null && !request.force && cachedFile(listFile) != null && cachedFile(categoriesFile) != null) {
@@ -309,7 +316,7 @@ object Repo {
                     if (!current(request)) return
                     val catalogue = ContentPolicy.series(x.parseSeries(list), x.parseCategories(categories))
                     commit(request) { seriesCategories.value = catalogue.categories; series.value = catalogue.items; seriesStatus.value = LoadStatus.Ready }
-                    if (current(request)) saveSnapshot { snapshots.writeSeries(request.identity, catalogue, storedAt(list, categories)) }
+                    saveSnapshot(request) { snapshots.writeSeries(request.identity, catalogue, storedAt(list, categories)) }
                 }
                 var availableAt = cached?.storedAt
                 if (cached == null && !request.force && cachedFile(listFile) != null && cachedFile(categoriesFile) != null) {
@@ -353,9 +360,9 @@ object Repo {
                     val vod = ContentPolicy.movies(r.movies, r.movieCategories)
                     val cleaned = Cleanup.movies(vod.items)
                     commit(request) { movieCategories.value = vod.categories; movies.value = cleaned; vodStatus.value = LoadStatus.Ready }
-                    if (current(request)) saveSnapshot { snapshots.writeMovies(request.identity, ContentPolicy.Catalogue(cleaned, vod.categories), file.lastModified()) }
+                    saveSnapshot(request) { snapshots.writeMovies(request.identity, ContentPolicy.Catalogue(cleaned, vod.categories), file.lastModified()) }
                     epgUrl = src.epgUrl.ifBlank { r.epgUrl ?: "" }
-                    saveSnapshot { discoveredGuide.writeText(epgUrl) }
+                    saveSnapshot(request) { discoveredGuide.writeText(epgUrl) }
                 }
                 var availableAt = if (cachedLive?.storedAt == cachedMovies?.storedAt) cachedLive?.storedAt else null
                 if ((cachedLive == null || cachedMovies == null) && !request.force && cachedFile(playlistFile) != null) {
@@ -405,7 +412,7 @@ object Repo {
             merged = lineup.merged
             liveCategories.value = categories; channels.value = lineup.channels; liveStatus.value = LoadStatus.Ready
         }
-        if (current(request)) saveSnapshot { snapshots.writeLive(request.identity, CatalogSnapshots.Live(lineup.channels, categories, lineup.merged), storedAt) }
+        saveSnapshot(request) { snapshots.writeLive(request.identity, CatalogSnapshots.Live(lineup.channels, categories, lineup.merged), storedAt) }
     }
 
     /**
@@ -461,7 +468,7 @@ object Repo {
                     categoryId = "__hot", categoryIds = listOf("__hot"))
             }.distinctBy { it.key }.filterNot { it.key in dead }
             commit(request) { trending.value = result }
-            if (current(request)) saveSnapshot { snapshots.writeTrending(request.identity, result, f.lastModified()) }
+            saveSnapshot(request) { snapshots.writeTrending(request.identity, result, f.lastModified()) }
         } catch (e: kotlinx.coroutines.CancellationException) { throw e }
         catch (_: Exception) { /* An optional provider list never removes the usable main lineup. */ }
     }
@@ -488,7 +495,7 @@ object Repo {
             epgStatus.value = if (have > 0) LoadStatus.Ready else LoadStatus.Error(providerError ?: "No guide data found for these channels")
             if (have > 0) guide = CatalogSnapshots.Guide(epg.toMap(), epgIcons.toMap())
         }
-        guide?.let { saveSnapshot { snapshots.writeGuide(request.identity, it, System.currentTimeMillis()) } }
+        guide?.let { saveSnapshot(request) { snapshots.writeGuide(request.identity, it, System.currentTimeMillis()) } }
     }
 
     private fun hasGuide(key: String, now: Long = System.currentTimeMillis()) = epg[key]?.any { it.end > now && !it.placeholder } == true
@@ -648,8 +655,10 @@ object Repo {
         if (vodStatus.value is LoadStatus.Loading) vodStatus.value = LoadStatus.Idle
         if (seriesStatus.value is LoadStatus.Loading) seriesStatus.value = LoadStatus.Idle
         if (epgStatus.value is LoadStatus.Loading) epgStatus.value = LoadStatus.Idle
-        cacheRoot.deleteRecursively()
-        snapshotRoot.deleteRecursively()
+        synchronized(snapshotWriteLock) {
+            cacheRoot.deleteRecursively()
+            snapshotRoot.deleteRecursively()
+        }
         logoJob?.cancel()
         logoJob = null
     }
