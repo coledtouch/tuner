@@ -1,6 +1,6 @@
 # Tuner for Samsung Tizen TV
 
-This is a Samsung TV web application, separate from the Android APK. It provides Live TV with a guide and preview, Movies, Series, Search, Favorites and Settings, using a directional pad, OK and Back. The application/package IDs are `TunerTv001.Tuner` / `TunerTv001`; version is 1.4.3.
+This is a Samsung TV web application, separate from the Android APK. It provides Live TV with a guide and preview, Movies, Series, Search, Favorites and Settings, using a directional pad, OK and Back. The application/package IDs are `TunerTv001.Tuner` / `TunerTv001`; version is 1.4.4.
 
 The runtime uses ES5 JavaScript, local HTML/CSS and Samsung's built-in AVPlay. HTTP(S) provider requests and artwork are allowed; scripts are restricted to the packaged application and the TV's local WebAPI library. No remote scripts, inline script handlers or eval are permitted. Provider accounts are entered on the device and must never be embedded in a widget or committed to source.
 
@@ -19,7 +19,7 @@ npm test
 npm run build
 ```
 
-The build copies only `config.xml`, `index.html`, `css/app.css`, the three runtime JavaScript files, and `assets/icon.png`. Tools, tests, node_modules, provider exports, preferences and certificates are excluded. Outputs go to `../../output/tizen`, outside the source checkout. Every build creates clean staging, validates ES5 syntax, application identifiers, privileges, CSP and ZIP checksums, and produces `Tuner-1.4.3-tizen-UNSIGNED.wgt`.
+The build copies only `config.xml`, `index.html`, `css/app.css`, the three runtime JavaScript files, and `assets/icon.png`. Tools, tests, node_modules, provider exports, preferences and certificates are excluded. Outputs go to `../../output/tizen`, outside the source checkout. Every build creates clean staging, validates ES5 syntax, application identifiers, privileges, CSP and ZIP checksums, and produces `Tuner-1.4.4-tizen-UNSIGNED.wgt`.
 
 **The unsigned widget is a staging artifact. It cannot be installed on a physical Samsung TV.** It needs a Samsung author/distributor certificate profile containing the target TV's DUID.
 
@@ -71,7 +71,7 @@ After that one-time profile setup:
 
 ```powershell
 .\tools\Package-Tizen.ps1 -CertificateProfile TunerTV
-.\tools\Install-Tizen.ps1 -TvAddress 192.168.1.50 -Widget ..\..\output\tizen\Tuner-1.4.3-tizen.wgt -Launch
+.\tools\Install-Tizen.ps1 -TvAddress 192.168.1.50 -Widget ..\..\output\tizen\Tuner-1.4.4-tizen.wgt -Launch
 ```
 
 The package script builds fresh staging, invokes the official signer and checks that both widget signature files exist. Their presence does not prove validity: the Samsung CLI and the target TV perform certificate validation. The installer rejects unsigned widgets, checks the developer port, uses an explicit device serial, and only launches Tuner when `-Launch` is supplied. It does not uninstall other applications or reset TV settings.
@@ -85,6 +85,8 @@ Multiview targets **two live channels**, respecting a two-stream provider limit.
 Active Multi View fills the viewport and hides the app header and setup dashboard. The main Picture in Picture feed covers the full screen; side-by-side feeds use the full width and preserve their picture proportions. Compact controls and channel labels hide after five seconds. OK, arrows or Menu reveals them without changing either stream. Back hides visible controls first; pressing Back while they are hidden leaves Multi View and stops both channels. Choosing a different layout or soundtrack resizes the same native players without reconnecting.
 
 Native playback also checks for streams that silently stop advancing while AVPlay still reports Playing. After roughly 30 to 35 seconds without progress, only the stalled stream reconnects once, then tries its available backups if another stall occurs. The healthy channel and selected soundtrack are preserved. Recovery uses the same native decoder and closes its old connection first. Paused playback, seeking, background suspension and muted streams whose native clocks still advance do not trigger this recovery.
+
+The M7 audio switch also verifies the firmware case where enabling an audio route takes effect but reports a type error. This compatibility check applies only to prepared, playing native Multi View streams. A failed verification restores the previous soundtrack; changing audio never opens another stream.
 
 The Android embedded jlibtorrent engine is not part of this web widget. Raw magnets, peer-to-peer torrent downloading and Android Picture-in-Picture are unavailable. A direct HTTP(S) stream from a provider or a compatible debrid service is required; the Android Streaming/Torrentio discovery interface is not included in this initial Tizen port. Native DRM systems require an authorized license flow and device support; this widget does not bypass DRM or provide license integration. The guide preview is an in-app player surface, not system Picture-in-Picture.
 

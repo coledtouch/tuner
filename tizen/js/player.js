@@ -300,24 +300,53 @@
         }
       }
     }
+    function rememberPeerSilence() {
+      // Samsung automatically silences the other active instance. Remember
+      // that change: disabling it again can throw InvalidAccessError on TV.
+      for (var i = 0; i < nativeOwners.length; i += 1) {
+        var peer = nativeOwners[i], peerState = '';
+        if (peer !== ownership && peer.owner && peer.audioActive && peer.appliedMuted !== true) {
+          try { peerState = peer.manager.getState(); } catch (ignorePeerState) {}
+          if (/^(IDLE|READY|PLAYING|PAUSED)$/.test(peerState)) { peer.appliedMuted = true; }
+        }
+      }
+    }
+    function forgetAudioState() {
+      ownership.appliedMuted = null;
+      // A thrown enable may already have silenced the previous player. Its
+      // cached route cannot suppress the real enable needed during rollback.
+      for (var i = 0; i < nativeOwners.length; i += 1) {
+        var peer = nativeOwners[i];
+        if (peer !== ownership && peer.owner && peer.audioActive) { peer.appliedMuted = null; }
+      }
+    }
+    function audioTypeMismatch(error) {
+      return error && error.name === 'TypeMismatchError' && error.code === 17;
+    }
     function applyAudio(force) {
       if (!audioPending || !av || ownership.owner !== api || suspended || (!force && operation)) { return; }
       if (ownership.appliedMuted === muted) { audioPending = false; return; }
       var method = muted ? 'disableAudioStream' : 'enableAudioStream';
       if (typeof av[method] !== 'function') { throw new Error('DualAudioUnsupported'); }
-      av[method]();
-      ownership.appliedMuted = muted;
-      if (!muted) {
-        // Samsung automatically silences the other active instance. Remember
-        // that change: disabling it again can throw InvalidAccessError on TV.
-        for (var i = 0; i < nativeOwners.length; i += 1) {
-          var peer = nativeOwners[i], peerState = '';
-          if (peer !== ownership && peer.owner && peer.audioActive && peer.appliedMuted === false) {
-            try { peerState = peer.manager.getState(); } catch (ignorePeerState) {}
-            if (/^(IDLE|READY|PLAYING|PAUSED)$/.test(peerState)) { peer.appliedMuted = true; }
-          }
+      try { av[method](); }
+      catch (error) {
+        forgetAudioState();
+        if (muted || !options.multiviewResource || !prepared || operation ||
+            nativeState() !== 'PLAYING' || !audioTypeMismatch(error)) { throw error; }
+        // M7 firmware can apply enableAudioStream, then throw TypeMismatch(17).
+        // A successful disable proves this target was enabled. A genuine
+        // before-effect failure leaves it muted and cannot pass this probe.
+        av.disableAudioStream();
+        ownership.appliedMuted = true;
+        rememberPeerSilence();
+        try { av.enableAudioStream(); }
+        catch (retryError) {
+          if (!audioTypeMismatch(retryError)) { forgetAudioState(); throw retryError; }
+          // The same verified firmware error on re-enable is a false negative.
         }
       }
+      ownership.appliedMuted = muted;
+      if (!muted) { rememberPeerSilence(); }
       audioPending = false;
     }
     function syncIntent(t) {
@@ -763,7 +792,10 @@
       var previous = audioSlot;
       // enableAudioStream automatically silences the other active instance.
       // Enable the chosen player first so a failure retains the previous audio.
-      if (!players[slot].setMuted(false)) { return false; }
+      if (!players[slot].setMuted(false)) {
+        players[previous].setMuted(false);
+        return false;
+      }
       if (!players[1 - slot].setMuted(true)) {
         players[slot].setMuted(slot !== previous);
         players[1 - slot].setMuted(1 - slot !== previous);

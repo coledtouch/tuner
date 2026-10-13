@@ -510,6 +510,95 @@ test('native audio switching adopts automatic peer silence and repeated selectio
   assert.equal(h.managers[0].prepares.length, 1); assert.equal(h.managers[1].prepares.length, 1);
 });
 
+function playingDual() {
+  const h = dualHarness(), dual = h.makeDual();
+  dual.play(0, { url: 'https://example.test/game1.ts', live: true });
+  dual.play(1, { url: 'https://example.test/game2.ts', live: true });
+  h.managers.forEach(manager => manager.completePrepare());
+  return { ...h, dual };
+}
+
+test('M7 TypeMismatch after native enable is verified and accepted in both audio directions without reconnecting', () => {
+  const h = playingDual();
+  for (const manager of h.managers) {
+    const enable = manager.enableAudioStream;
+    manager.enableAudioStream = function () { assert.equal(this, manager); enable.call(this); throw { name: 'TypeMismatchError', code: 17 }; };
+  }
+  for (const slot of [1, 0, 1, 0]) {
+    assert.equal(h.dual.selectAudio(slot), true);
+    assert.equal(h.managers[slot].audioEnabled, true); assert.equal(h.managers[1 - slot].audioEnabled, false);
+    const before = h.managers.map(manager => manager.calls.length);
+    assert.equal(h.dual.selectAudio(slot), true);
+    assert.deepEqual(h.managers.map(manager => manager.calls.length), before, 'an already chosen route remains idempotent');
+  }
+  assert.deepEqual(h.managers.map(manager => manager.prepares.length), [1, 1]);
+  assert.equal(h.allocated, 2);
+});
+
+test('a genuine before-effect TypeMismatch cannot pass the M7 enabled-route probe', () => {
+  const h = playingDual();
+  let attempts = 0;
+  h.managers[1].enableAudioStream = function () { attempts++; throw { name: 'TypeMismatchError', code: 17 }; };
+  assert.equal(h.dual.selectAudio(1), false);
+  assert.equal(attempts, 1, 'an unsuccessful disable probe must not reach re-enable');
+  assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false);
+  assert.equal(h.dual.selectAudio(0), true, 'the previous selected route remains the desired route');
+  h.dual.suspend(); h.dual.restore(); h.managers.forEach(manager => manager.completeRestore());
+  assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false);
+  assert.deepEqual(h.managers.map(manager => manager.prepares.length), [1, 1]);
+});
+
+test('failed M7 re-enable restores the auto-silenced peer using a real enable, rather than its stale cache', () => {
+  const h = playingDual(), enable = h.managers[1].enableAudioStream;
+  const priorEnables = h.managers[0].calls.filter(call => call[0] === 'enableAudioStream').length;
+  let attempts = 0;
+  h.managers[1].enableAudioStream = function () {
+    if (++attempts === 1) { enable.call(this); throw { name: 'TypeMismatchError', code: 17 }; }
+    throw { name: 'NotSupportedError' };
+  };
+  assert.equal(h.dual.selectAudio(1), false); assert.equal(attempts, 2);
+  assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false);
+  assert.equal(h.managers[0].calls.filter(call => call[0] === 'enableAudioStream').length, priorEnables + 1);
+  h.dual.suspend(); h.dual.restore(); h.managers.forEach(manager => manager.completeRestore());
+  assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false);
+  assert.deepEqual(h.managers.map(manager => manager.prepares.length), [1, 1]);
+});
+
+test('a failed verification read after an applied M7 enable also restores previous audio', () => {
+  const h = playingDual(), enable = h.managers[1].enableAudioStream, disable = h.managers[1].disableAudioStream;
+  h.managers[1].enableAudioStream = function () { enable.call(this); throw { name: 'TypeMismatchError', code: 17 }; };
+  h.managers[1].disableAudioStream = function () { throw { name: 'UnknownError' }; };
+  assert.equal(h.dual.selectAudio(1), false);
+  assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false);
+  h.managers[1].disableAudioStream = disable;
+  assert.equal(h.dual.selectAudio(1), true, 'an explicit retry can succeed once native verification is available');
+  assert.equal(h.managers[0].audioEnabled, false); assert.equal(h.managers[1].audioEnabled, true);
+  assert.deepEqual(h.managers.map(manager => manager.prepares.length), [1, 1]);
+});
+
+test('TypeMismatch workaround stays restricted to prepared PLAYING multiview and code 17', () => {
+  const h = playingDual(), enable = h.managers[1].enableAudioStream;
+  h.managers[1].enableAudioStream = function () { enable.call(this); throw { name: 'TypeMismatchError', code: 99 }; };
+  const disables = h.managers[1].calls.filter(call => call[0] === 'disableAudioStream').length;
+  assert.equal(h.dual.selectAudio(1), false);
+  assert.equal(h.managers[1].calls.filter(call => call[0] === 'disableAudioStream').length, disables, 'other errors never use the compatibility probe');
+  assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false);
+  const paused = playingDual(), pausedEnable = paused.managers[1].enableAudioStream;
+  paused.managers.forEach(manager => manager.pause());
+  paused.managers[1].enableAudioStream = function () { pausedEnable.call(this); throw { name: 'TypeMismatchError', code: 17 }; };
+  const pausedDisables = paused.managers[1].calls.filter(call => call[0] === 'disableAudioStream').length;
+  assert.equal(paused.dual.selectAudio(1), false);
+  assert.equal(paused.managers[1].calls.filter(call => call[0] === 'disableAudioStream').length, pausedDisables, 'paused playback never uses the compatibility probe');
+  assert.equal(paused.managers[0].audioEnabled, true); assert.equal(paused.managers[1].audioEnabled, false);
+  const single = harness(); single.player.play({ url: 'https://example.test/single.ts', live: true }); single.av.completePrepare();
+  single.player.setMuted(true);
+  const singleEnable = single.av.enableAudioStream;
+  single.av.enableAudioStream = function () { singleEnable.call(this); throw { name: 'TypeMismatchError', code: 17 }; };
+  const singleDisables = single.av.calls.filter(call => call[0] === 'disableAudioStream').length;
+  assert.equal(single.player.setMuted(false), false);
+  assert.equal(single.av.calls.filter(call => call[0] === 'disableAudioStream').length, singleDisables, 'single-player semantics are unchanged');
+});
+
 test('reopening a muted dual stream resets applied audio state and mutes the new stream once', () => {
   const h = dualHarness(), dual = h.makeDual();
   dual.play(0, { url: 'https://example.test/game1.ts', live: true });
