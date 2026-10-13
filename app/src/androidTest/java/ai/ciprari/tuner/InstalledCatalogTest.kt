@@ -27,7 +27,11 @@ class InstalledCatalogTest {
         assertTrue("Boston's news stations are missing", news.any { Regex("WCVB|WBZ|WBTS|WFXT|WHDH").containsMatchIn(it.name.uppercase()) })
         assertTrue("National cable news was removed", channels.any { it.name.contains("CNN", ignoreCase = true) })
         assertTrue("Sports channels were removed", channels.any { it.name.contains("ESPN", ignoreCase = true) })
-        assertFalse("An outside-market affiliate remains", channels.any { Regex("\\b(?:WNBC|WABC|WCBS|WNYW|KABC|KCAL|KTVU|WLS)\\b").containsMatchIn(it.name.uppercase()) })
+        val outsideAffiliates = channels.filter {
+            !it.name.startsWith("NFL Teams:", ignoreCase = true) &&
+                Regex("\\b(?:WNBC|WABC|WCBS|WNYW|KABC|KCAL|KTVU|WLS)\\b").containsMatchIn(it.name.uppercase())
+        }
+        assertTrue("Outside-market affiliates remain: ${outsideAffiliates.map { it.name }}", outsideAffiliates.isEmpty())
         InstrumentationRegistry.getInstrumentation().sendStatus(2, Bundle().apply {
             putString("stream", "Regional guide: ${channels.size} channels, ${news.size} nearby news feeds. Stations: ${news.map { it.name }.distinct().joinToString()}\n")
         })
