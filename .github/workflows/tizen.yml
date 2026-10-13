@@ -1,0 +1,40 @@
+name: Samsung TV
+
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tizen-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: tizen
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Install validation dependency
+        run: npm install --no-package-lock --ignore-scripts
+      - name: Verify sources and behavior
+        run: npm run check && npm test
+      - name: Build unsigned staging widget
+        run: npm run build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tuner-samsung-unsigned-staging
+          path: ../output/tizen/*UNSIGNED.wgt
+          retention-days: 14

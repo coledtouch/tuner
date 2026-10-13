@@ -9,3 +9,10 @@ local.properties
 keystore.properties
 signing/
 output/
+node_modules/
+*.p12
+*.pfx
+*.wgt
+*.unsigned.zip
+.playwright-cli/
+.playwright/

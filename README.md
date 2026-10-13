@@ -2,6 +2,8 @@
 
 IPTV player for Android TV and Google TV. Cable-style Live TV guide, live preview, movies, series, search, and themes. Version 1.4.0 separates guide browsing from channel changes, adds native Picture-in-Picture, and improves navigation and Favorites, with unrestricted audio and an integrated Streaming tab.
 
+The [Samsung Tizen TV app](tizen/README.md) provides Live TV, Movies, Series, Search, a black theme, and two-channel side-by-side or in-app Picture in Picture. It is built and signed separately from the Android APK using a Samsung TV certificate.
+
 ## Install on Google TV
 
 1. On the TV: Settings > System > About, click "Android TV OS build" 7 times to unlock Developer options.
