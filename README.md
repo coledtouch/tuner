@@ -1,6 +1,6 @@
 # Tuner
 
-IPTV player for Android TV and Google TV. Cable-style grid guide, live preview, movies, series, search, themes.
+IPTV player for Android TV and Google TV. Cable-style Live TV guide, live preview, movies, series, search, and themes. Version 1.1.0 adds a clearer remote experience, responsive layouts, richer libraries, and USA / English content filtering.
 
 ## Install on Google TV
 
@@ -11,7 +11,7 @@ IPTV player for Android TV and Google TV. Cable-style grid guide, live preview, 
 
 ```powershell
 adb connect 192.168.1.50:5555
-adb install -r .\Tuner-1.0.0.apk
+adb install -r .\Tuner-1.1.0.apk
 ```
 
 Accept the debugging prompt on the TV the first time. Tuner shows up in your Apps row.
@@ -25,6 +25,8 @@ Choose **Xtream Codes** and enter the server URL, username and password from you
 If you only have a link like `http://host:port/get.php?username=...&password=...&type=m3u_plus`, pick **M3U URL** and paste it. Tuner spots the credentials and switches to Xtream mode so you still get movies and series. Plain M3U links work too.
 
 ## Remote controls
+
+Use Left / Right in the top navigation, then OK to open Live TV, Movies, Series, Search, or Settings. Moving across the navigation keeps the current page open until you select a destination. In Movies and Series, select a category shortcut to jump straight to its titles; returning from details restores your place.
 
 | Where | Key | Does |
 |---|---|---|
@@ -50,6 +52,12 @@ If you only have a link like `http://host:port/get.php?username=...&password=...
 2. Free regional guides from epgshare01.online for any channel still missing listings, matched by channel name. Pick regions in Settings > Guide. Defaults: US national, US sports, Canada, UK.
 3. Xtream's per-channel short EPG for anything left, fetched as rows scroll into view.
 
+## USA / English content
+
+The catalog is filtered before it reaches the guide, libraries, search, Favorites, or the live channel picker. Live TV requires a positive U.S. country label and excludes explicitly non-English feeds. Movies and Series require a positive English language or an eligible English-speaking provider label. The policy reads country/language metadata, category labels, tagged names, and U.S. EPG identifiers. Plain M3U playlists can use `tvg-country="US"` and `tvg-language="English"`.
+
+Unlabelled entries and entries with conflicting country/language metadata are hidden. Incorrect provider labels can still misidentify a stream; title spelling alone is never used to guess the language. Empty libraries explain the labeling requirement. Continue Watching only includes movies still present in the filtered catalog; old episode shortcuts are hidden because they do not record the parent series.
+
 ## Logos
 
 Every channel shows a logo. Tuner tries the provider's logo, then the guide's icon, then the iptv-org open logo database, and finally draws a lettered tile.
@@ -66,13 +74,21 @@ Requires JDK 17+ and the Android SDK (platform 35).
 .\gradlew.bat assembleRelease
 ```
 
-Output: `app\build\outputs\apk\release\app-release.apk`. The release build is signed with the debug key so it installs directly; add your own keystore in `app\build.gradle.kts` before distributing.
+Output: `app\build\outputs\apk\release\app-release.apk` when the external release key is available. Without that key, Gradle produces `app-release-unsigned.apk`; CI never invents a replacement release key.
 
-Tests (parsers, name matching, and Robolectric screenshots of the guide written to `app\build\screens`):
+The shared release key is stored outside this source folder, at `../signing/tuner-release.jks`, with `../signing/keystore.properties`. Copy those same two files to the other build machine and place `signing` beside its source checkout. You can instead set `TUNER_SIGNING_DIR` to that directory, or pass `-PtunerSigningProperties=/absolute/path/keystore.properties`. Keep both files outside Git and source archives. The properties contain `storeFile`, `keyAlias`, `storePassword`, and `keyPassword`; a relative `storeFile` resolves beside the properties file.
+
+The release certificate SHA-256 is `EC:6F:ED:26:F3:B6:88:C4:6A:CB:1A:55:2B:D0:B9:EE:8C:E8:C9:62:BA:B4:DB:74:51:DF:3F:35:A3:95:45:86`. Keep a private backup of the signing folder; all future release updates must use this key.
+
+The installed 1.0.2 uses the old debug certificate `63:1E:66:57:D0:2D:8B:E2:97:09:50:1D:E6:69:1A:1B:4C:4F:1D:C2:90:B2:B5:F2:8A:63:9C:4A:B3:0D:82:A5`. Android cannot install the new release key over that version. A one-time migration/reinstall is needed; removing 1.0.2 clears its locally saved playlists and settings. After moving to the release-signed version, builds on both machines update it normally.
+
+Tests (parsers, content policy, name matching, remote navigation, and Robolectric screenshots written to `app\build\screens`):
 
 ```powershell
 .\gradlew.bat testDebugUnitTest
 ```
+
+Screenshot coverage includes Live TV, Movies, Series, playback controls, themes, and a compact 720 × 405 dp layout. Robolectric's native dependencies require a supported host architecture; on Windows ARM, use an x64 JDK under Windows emulation for these tests.
 
 ## Notes
 

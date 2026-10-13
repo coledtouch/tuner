@@ -94,6 +94,12 @@ fun SettingsScreen(state: AppState) {
 
             header("Appearance")
             item {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp)) {
+                    Text("USA / English content", color = Palette.accent, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    Text("U.S. English channels and English movies and series. Entries without a reliable provider country or language label are hidden.", color = Palette.dim, fontSize = 13.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 5.dp))
+                }
+            }
+            item {
                 SettingRow("Theme", "Colors for the guide, menus and highlights", trailing = Palette.theme.name, onClick = { themeSheet = true })
             }
 

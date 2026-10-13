@@ -29,7 +29,7 @@ sealed interface Screen {
     data class Player(val request: PlayRequest) : Screen
 }
 
-enum class Tab(val title: String) { GUIDE("Guide"), MOVIES("Movies"), SERIES("Series"), SEARCH("Search"), SETTINGS("Settings") }
+enum class Tab(val title: String) { GUIDE("Live TV"), MOVIES("Movies"), SERIES("Series"), SEARCH("Search"), SETTINGS("Settings") }
 
 /** Screen-independent state that has to survive navigating to a detail page or the player and back. */
 class AppState {

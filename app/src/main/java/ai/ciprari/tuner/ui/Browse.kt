@@ -7,6 +7,7 @@ import androidx.compose.foundation.gestures.BringIntoViewSpec
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -19,7 +20,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -31,7 +31,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -55,6 +57,8 @@ import ai.ciprari.tuner.data.Repo
 import ai.ciprari.tuner.data.Series
 import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.util.Locale
 
 data class BrowseItem(
     val key: String,
@@ -72,13 +76,27 @@ data class BrowseItem(
 
 data class BrowseRow(val key: String, val title: String, val items: List<BrowseItem>)
 
-/** TV-style scrolling: keep the focused row/card near a fixed pivot instead of at the edge. */
+internal fun contentRating(value: String?): String? {
+    val rating = value?.trim()?.toFloatOrNull()?.takeIf { it > 0f && it.isFinite() } ?: return null
+    return String.format(Locale.US, "%.1f", rating).removeSuffix(".0")
+}
+
+/** Keep the focused card clear of the screen edge, including its focus ring. */
 @OptIn(ExperimentalFoundationApi::class)
 private fun pivotSpec(fraction: Float) = object : BringIntoViewSpec {
     override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float {
-        // Always line the focused item up with the pivot; the list clamps at its ends.
-        return offset - containerSize * fraction
+        val pivot = (containerSize * fraction).coerceAtMost((containerSize - size).coerceAtLeast(0f))
+        return offset - pivot
     }
+}
+
+/** Lazy cards may be composed a frame after their row is scrolled back into view. */
+internal suspend fun requestAttachedFocus(requester: FocusRequester): Boolean {
+    repeat(12) {
+        withFrameNanos { }
+        if (runCatching { requester.requestFocus() }.isSuccess) return true
+    }
+    return false
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -91,55 +109,140 @@ fun BrowseScreen(
     status: LoadStatus,
     emptyTitle: String,
 ) {
-    var heroItem by remember { mutableStateOf<BrowseItem?>(null) }
-    val firstCard = remember { FocusRequester() }
+    val displayRows = remember(rows) {
+        rows.distinctBy { it.key }.map { it.copy(items = it.items.distinctBy { item -> item.key }) }
+            .filter { it.items.isNotEmpty() }
+    }
+    val itemsByKey = remember(prefix, displayRows) {
+        displayRows.asSequence().flatMap { row ->
+            row.items.asSequence().map { item -> "$prefix:${row.key}:${item.key}" to item }
+        }.toMap()
+    }
+    var heroKey by remember(prefix) { mutableStateOf<String?>(null) }
+    var activeRow by remember(prefix) { mutableStateOf<String?>(null) }
+    val requesters = remember(prefix) { mutableMapOf<String, FocusRequester>() }
+    val scope = rememberCoroutineScope()
 
-    LaunchedEffect(state.restoreFocus, rows.isNotEmpty()) {
-        if (!state.restoreFocus || rows.isEmpty()) return@LaunchedEffect
-        delay(300)
-        if (state.restoreFocus) {
-            listState.scrollToItem(0)
-            delay(30)
-            runCatching { firstCard.requestFocus() }
-            state.restoreFocus = false
-        }
+    fun cardKey(row: BrowseRow, item: BrowseItem) = "$prefix:${row.key}:${item.key}"
+
+    LaunchedEffect(state.restoreFocus, displayRows) {
+        if (!state.restoreFocus || displayRows.isEmpty()) return@LaunchedEffect
+        val rowIndex = displayRows.indexOfFirst { row ->
+            row.items.any { cardKey(row, it) == state.lastFocusedKey }
+        }.coerceAtLeast(0)
+        val row = displayRows[rowIndex]
+        val cardIndex = row.items.indexOfFirst { cardKey(row, it) == state.lastFocusedKey }.coerceAtLeast(0)
+        val key = cardKey(row, row.items[cardIndex])
+        val requester = requesters.getOrPut(key) { FocusRequester() }
+        // Reused list states retain their last layout info after leaving the screen. Let the new
+        // lazy column attach before inspecting it, then let its nested row attach before scrolling.
+        withFrameNanos { }
+        // Keep the existing scroll positions when the returning card is already visible.
+        if (listState.layoutInfo.visibleItemsInfo.none { it.index == rowIndex }) listState.scrollToItem(rowIndex)
+        withFrameNanos { }
+        val rowState = state.rowState("$prefix:${row.key}")
+        if (rowState.layoutInfo.visibleItemsInfo.none { it.index == cardIndex }) rowState.scrollToItem(cardIndex)
+        if (state.restoreFocus && requestAttachedFocus(requester)) state.restoreFocus = false
     }
 
-    if (rows.isEmpty()) {
+    if (displayRows.isEmpty()) {
         when (status) {
             is LoadStatus.Loading -> LoadingMessage(status.message)
-            is LoadStatus.Error -> EmptyMessage("Couldn't load", status.message)
-            else -> EmptyMessage(emptyTitle)
+            is LoadStatus.Error -> EmptyMessage("Couldn't load your library", status.message)
+            else -> EmptyMessage(emptyTitle, "English provider labels are required. Check your playlist in Settings.")
         }
         return
     }
 
-    Column(Modifier.fillMaxSize()) {
-        Hero(heroItem ?: rows.first().items.firstOrNull())
-        CompositionLocalProvider(LocalBringIntoViewSpec provides pivotSpec(0.0f)) {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = 60.dp),
-            ) {
-                itemsIndexed(rows.distinctBy { it.key }, key = { _, r -> r.key }) { rowIdx, row ->
-                    Column(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 10.dp)) {
-                        SectionTitle(row.title, Modifier.padding(start = 28.dp, bottom = 10.dp))
-                        CompositionLocalProvider(LocalBringIntoViewSpec provides pivotSpec(0.06f)) {
-                            LazyRow(
-                                state = state.rowState("$prefix:${row.key}"),
-                                contentPadding = PaddingValues(horizontal = 28.dp),
-                                horizontalArrangement = Arrangement.spacedBy(14.dp),
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val compact = maxHeight < 420.dp || maxWidth < 760.dp
+        val dense = maxHeight < 330.dp
+        val inset = if (compact) 20.dp else 28.dp
+        val heroHeight = if (dense) 62.dp else if (compact) 96.dp else 160.dp
+        val categoryHeight = if (displayRows.size > 1) 43.dp else 0.dp
+        // Reserve the row heading and two-line title before assigning space to the artwork.
+        val posterWidth = if (compact) ((maxHeight - heroHeight - categoryHeight - 82.dp) / 1.48f).coerceIn(72.dp, 98.dp) else 112.dp
+        val shownHero = heroKey?.let { itemsByKey[it] } ?: displayRows.first().items.first()
+
+        Column(Modifier.fillMaxSize()) {
+            Hero(
+                item = shownHero,
+                label = if (shownHero.progress != null) "CONTINUE WATCHING" else if (prefix == "movies") "MOVIES" else "SERIES",
+                height = heroHeight,
+                inset = inset,
+                compact = compact,
+                dense = dense,
+            )
+            if (displayRows.size > 1) {
+                LazyRow(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                    contentPadding = PaddingValues(horizontal = inset, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    itemsIndexed(displayRows, key = { _, row -> row.key }) { index, row ->
+                        val selected = (activeRow ?: displayRows.first().key) == row.key
+                        FocusBox(
+                            onClick = {
+                                scope.launch {
+                                    listState.scrollToItem(index)
+                                    val horizontal = state.rowState("$prefix:${row.key}")
+                                    val cardIndex = horizontal.firstVisibleItemIndex.coerceIn(row.items.indices)
+                                    val key = cardKey(row, row.items[cardIndex])
+                                    val requester = requesters.getOrPut(key) { FocusRequester() }
+                                    requestAttachedFocus(requester)
+                                }
+                            },
+                            shape = RoundedCornerShape(50),
+                            color = if (selected) Palette.accent.copy(alpha = 0.18f) else Palette.surface,
+                            focusedColor = Palette.focus,
+                            focusedScale = 1.02f,
+                            ring = false,
+                        ) { focused ->
+                            Text(
+                                row.title,
+                                color = if (focused) Palette.onFocus else if (selected) Palette.accent else Palette.dim,
+                                fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                            )
+                        }
+                    }
+                }
+            }
+            CompositionLocalProvider(LocalBringIntoViewSpec provides pivotSpec(0.02f)) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentPadding = PaddingValues(top = 5.dp, bottom = 28.dp),
+                ) {
+                    itemsIndexed(displayRows, key = { _, row -> row.key }) { _, row ->
+                        Column(Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(start = inset, end = inset, bottom = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                itemsIndexed(row.items.distinctBy { it.key }, key = { _, it -> it.key }) { idx, item ->
-                                    val cardKey = "$prefix:${row.key}:${item.key}"
-                                    PosterCard(
-                                        item = item,
-                                        modifier = if (rowIdx == 0 && idx == 0) Modifier.focusRequester(firstCard) else Modifier,
-                                        restore = state.restoreFocus && state.lastFocusedKey == cardKey,
-                                        onRestored = { state.restoreFocus = false },
-                                        onFocused = { heroItem = item; state.lastFocusedKey = cardKey },
-                                    )
+                                Text(row.title, color = Palette.text, fontSize = if (compact) 15.sp else 17.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                                Text("${row.items.size} " + if (row.items.size == 1) "title" else "titles", color = Palette.faint, fontSize = 11.sp)
+                            }
+                            CompositionLocalProvider(LocalBringIntoViewSpec provides pivotSpec(0.04f)) {
+                                LazyRow(
+                                    state = state.rowState("$prefix:${row.key}"),
+                                    contentPadding = PaddingValues(horizontal = inset, vertical = if (compact) 4.dp else 6.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                                ) {
+                                    itemsIndexed(row.items, key = { _, item -> item.key }) { _, item ->
+                                        val key = cardKey(row, item)
+                                        PosterCard(
+                                            item = item,
+                                            modifier = Modifier.focusRequester(requesters.getOrPut(key) { FocusRequester() }),
+                                            width = posterWidth,
+                                            compact = compact,
+                                            onFocused = {
+                                                heroKey = key
+                                                activeRow = row.key
+                                                state.lastFocusedKey = key
+                                            },
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -151,98 +254,101 @@ fun BrowseScreen(
 }
 
 @Composable
-private fun PosterCard(
-    item: BrowseItem,
-    modifier: Modifier,
-    restore: Boolean,
-    onRestored: () -> Unit,
-    onFocused: () -> Unit,
-    width: Dp = 116.dp,
-) {
-    val fr = remember { FocusRequester() }
-    if (restore) LaunchedEffect(Unit) { delay(60); runCatching { fr.requestFocus() }; onRestored() }
+private fun PosterCard(item: BrowseItem, modifier: Modifier, onFocused: () -> Unit, width: Dp, compact: Boolean) {
     FocusBox(
         onClick = item.onClick,
-        modifier = modifier.focusRequester(fr).width(width).height(width * 1.5f),
-        shape = RoundedCornerShape(8.dp),
-        color = Palette.surface2,
-        focusedScale = 1.08f,
+        modifier = modifier.width(width),
+        shape = RoundedCornerShape(10.dp),
+        color = Palette.surface,
+        focusedColor = Palette.surface2,
+        focusedScale = 1.045f,
         onFocus = { if (it) onFocused() },
-    ) { f ->
-        if (item.image != null) {
-            AsyncImage(item.image, item.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-        }
-        if (item.image == null || f) {
-            Box(
-                Modifier.fillMaxSize().background(
-                    Brush.verticalGradient(
-                        listOf(Color.Transparent, Color.Black.copy(alpha = if (item.image == null) 0.2f else 0.85f)),
-                        startY = 100f,
-                    ),
-                ),
-            )
-            Text(
-                item.title, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
-                maxLines = 3, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center, lineHeight = 15.sp,
-                modifier = Modifier.align(if (item.image == null) Alignment.Center else Alignment.BottomCenter).padding(8.dp),
-            )
-        }
-        item.badge?.let {
-            Text(
-                it, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold,
-                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).clip(RoundedCornerShape(4.dp))
-                    .background(Color.Black.copy(alpha = 0.65f)).padding(horizontal = 5.dp, vertical = 1.dp),
-            )
-        }
-        item.progress?.let { p ->
-            Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(4.dp).background(Color.Black.copy(alpha = 0.6f))) {
-                Box(Modifier.fillMaxHeight().fillMaxWidth(p.coerceIn(0f, 1f)).background(Palette.accent))
+    ) { focused ->
+        Column {
+            Box(Modifier.fillMaxWidth().height(width * 1.48f).clip(RoundedCornerShape(topStart = 10.dp, topEnd = 10.dp)).background(Brush.linearGradient(listOf(Palette.accent.copy(alpha = 0.14f), Palette.surface2, Palette.surface)))) {
+                // The fallback remains underneath the image for missing or failed artwork.
+                Text(
+                    item.title, color = Palette.dim, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                    maxLines = 4, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center,
+                    modifier = Modifier.align(Alignment.Center).padding(12.dp),
+                )
+                item.image?.takeIf { it.isNotBlank() }?.let { image ->
+                    AsyncImage(image, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                }
+                item.badge?.takeIf { it.isNotBlank() && it != "0" && it != "0.0" }?.let { badge ->
+                    Text(
+                        "★ $badge", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).clip(RoundedCornerShape(5.dp))
+                            .background(Color.Black.copy(alpha = 0.78f)).padding(horizontal = 5.dp, vertical = 3.dp),
+                    )
+                }
+                item.progress?.let { progress ->
+                    Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(34.dp).background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.85f))))) {
+                        Text("Resume", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 8.dp, top = 9.dp))
+                    }
+                    Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(3.dp).background(Color.Black.copy(alpha = 0.6f))) {
+                        Box(Modifier.fillMaxHeight().fillMaxWidth(progress.coerceIn(0f, 1f)).background(Palette.accent))
+                    }
+                }
             }
+            Text(
+                item.title, color = if (focused) Palette.text else Palette.dim,
+                fontSize = if (compact) 11.sp else 12.sp, fontWeight = FontWeight.Medium, maxLines = 2, minLines = 2,
+                overflow = TextOverflow.Ellipsis, lineHeight = if (compact) 14.sp else 16.sp,
+                modifier = Modifier.padding(horizontal = if (compact) 6.dp else 8.dp, vertical = if (compact) 6.dp else 7.dp),
+            )
         }
     }
 }
 
 @Composable
-private fun Hero(item: BrowseItem?) {
-    // Movies only carry plot/backdrop in their detail call; fetch it once focus rests on a poster.
-    val info by produceState<ai.ciprari.tuner.data.MovieInfo?>(null, item?.key) {
+private fun Hero(item: BrowseItem, label: String, height: Dp, inset: Dp, compact: Boolean, dense: Boolean) {
+    // Debounce focus changes. The repository also caches movie details across visits.
+    val info by produceState<ai.ciprari.tuner.data.MovieInfo?>(null, item.key) {
         value = null
-        val m = item?.movie ?: return@produceState
+        val movie = item.movie ?: return@produceState
         delay(650)
-        value = Repo.movieInfo(m)
+        value = Repo.movieInfo(movie)
     }
-    val backdrop = item?.heroBackdrop ?: info?.backdrop
-    val plot = item?.heroPlot ?: info?.plot
+    val backdrop = item.heroBackdrop ?: info?.backdrop
+    val plot = item.heroPlot ?: info?.plot
     val meta = listOfNotNull(
-        item?.heroMeta ?: info?.year,
+        (item.heroMeta ?: info?.year)?.takeIf { it.isNotBlank() },
         info?.duration?.takeIf { it.isNotBlank() && it != "00:00:00" },
-        info?.genre,
-        (item?.badge ?: info?.rating)?.let { "★ $it" },
+        info?.genre?.takeIf { it.isNotBlank() },
+        contentRating(item.badge ?: info?.rating)?.let { "★ $it" },
     ).joinToString("  ·  ")
 
-    Box(Modifier.fillMaxWidth().height(206.dp)) {
-        Crossfade(backdrop ?: item?.image, label = "hero") { img ->
-            if (img != null) Box(Modifier.fillMaxSize()) {
-                AsyncImage(
-                    img, null, contentScale = ContentScale.Crop, alpha = if (backdrop != null) 0.55f else 0.22f,
-                    modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().fillMaxWidth(0.62f),
+    Box(Modifier.fillMaxWidth().height(height)) {
+        Crossfade(backdrop ?: item.image, modifier = Modifier.fillMaxSize(), label = "library-artwork") { image ->
+            Box(Modifier.fillMaxSize()) {
+                if (image != null) AsyncImage(
+                    image, null, contentScale = ContentScale.Crop, alpha = if (backdrop != null) 0.62f else 0.28f,
+                    modifier = Modifier.fillMaxHeight().fillMaxWidth(0.65f).align(Alignment.CenterEnd),
                 )
             }
         }
-        Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(0.35f to Palette.bg, 0.75f to Color.Transparent)))
-        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.6f to Color.Transparent, 1f to Palette.bg)))
-        if (item != null) Column(Modifier.fillMaxWidth(0.55f).padding(start = 28.dp, top = 14.dp)) {
-            Text(item.title, color = Palette.text, fontSize = 28.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 32.sp)
-            if (meta.isNotBlank()) Text(meta, color = Palette.text.copy(alpha = 0.8f), fontSize = 14.sp, maxLines = 1, modifier = Modifier.padding(top = 6.dp))
-            if (!plot.isNullOrBlank()) Text(
-                plot, color = Palette.dim, fontSize = 14.sp, lineHeight = 19.sp, maxLines = 3,
-                overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp),
+        Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(0.25f to Palette.bg, 0.68f to Palette.bg.copy(alpha = 0.15f), 1f to Color.Transparent)))
+        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.45f to Color.Transparent, 1f to Palette.bg)))
+        Column(Modifier.fillMaxWidth(if (compact) 0.72f else 0.64f).padding(start = inset, top = 9.dp, end = 8.dp)) {
+            Text(label, color = Palette.accent, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.8.sp)
+            Text(
+                item.title, color = Palette.text, fontSize = if (compact) 23.sp else 29.sp,
+                fontWeight = FontWeight.Bold, maxLines = if (compact) 1 else 2,
+                overflow = TextOverflow.Ellipsis, lineHeight = if (compact) 27.sp else 32.sp,
+                modifier = Modifier.padding(top = 5.dp),
+            )
+            if (!dense && meta.isNotBlank()) Text(meta, color = Palette.text.copy(alpha = 0.86f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 5.dp))
+            if (!compact && !plot.isNullOrBlank()) Text(
+                plot, color = Palette.dim, fontSize = 13.sp, lineHeight = 18.sp, maxLines = 2,
+                overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 6.dp),
+            ) else if (!dense && (!compact || meta.isBlank())) Text(
+                if (item.progress != null) "Select to pick up where you left off" else "Select a title to see details and watch",
+                color = Palette.dim, fontSize = 12.sp, modifier = Modifier.padding(top = 7.dp),
             )
         }
     }
 }
-
-// ------------------------------------------------------------------ Movies & Series tabs
 
 private fun <T> groupRows(
     prefix: String,
@@ -252,25 +358,38 @@ private fun <T> groupRows(
     toItem: (T) -> BrowseItem,
 ): List<BrowseRow> {
     val byCat = LinkedHashMap<String, MutableList<T>>()
-    items.forEach { t -> categoriesOf(t).ifEmpty { listOf("") }.forEach { c -> byCat.getOrPut(c) { mutableListOf() } += t } }
+    items.forEach { item -> categoriesOf(item).ifEmpty { listOf("") }.distinct().forEach { category -> byCat.getOrPut(category) { mutableListOf() } += item } }
     val known = categories.map { it.id }.toSet()
-    val rows = categories.mapNotNull { c ->
-        byCat[c.id]?.takeIf { it.isNotEmpty() }?.let { BrowseRow("$prefix${c.id}", c.name, it.map(toItem)) }
+    val rows = categories.mapNotNull { category ->
+        byCat[category.id]?.takeIf { it.isNotEmpty() }?.let { BrowseRow("$prefix${category.id}", category.name, it.map(toItem)) }
     }
     val orphans = byCat.filterKeys { it !in known }.values.flatten().distinct()
-    return if (orphans.isEmpty()) rows else rows + BrowseRow("${prefix}other", "More", orphans.map(toItem))
+    return if (orphans.isEmpty()) rows else rows + BrowseRow("${prefix}other", if (rows.isEmpty()) "All Titles" else "More to Watch", orphans.map(toItem))
+}
+
+/** Resume only the same playable item in the currently eligible catalog. Provider ids can collide. */
+internal fun eligibleMovieRecents(recents: List<Recent>, movies: List<Movie>): List<Recent> {
+    val moviesById = movies.associateBy { it.id }
+    return recents.mapNotNull { recent ->
+        val movie = moviesById[recent.id]?.takeIf { it.url.isNotBlank() && it.url == recent.url }
+            ?: return@mapNotNull null
+        recent.copy(title = movie.name, image = movie.poster, url = movie.url)
+    }
 }
 
 fun recentsRow(recents: List<Recent>, kindPrefix: List<String>, state: AppState): BrowseRow? {
-    val list = recents.filter { r -> kindPrefix.any { r.id.startsWith(it) } }
+    // Episode recents lack a parent series id, so they cannot establish that the series is eligible.
+    // Keep them out of the library until that association can be verified.
+    if (kindPrefix.all { it == "e:" }) return null
+    val list = eligibleMovieRecents(recents, Repo.movies.value)
+        .filter { recent -> kindPrefix.any { recent.id.startsWith(it) } }
     if (list.isEmpty()) return null
-    return BrowseRow("continue", "Continue Watching", list.map { r ->
+    return BrowseRow("continue", "Continue Watching", list.map { recent ->
         BrowseItem(
-            key = r.id, title = r.title + (r.subtitle?.let { " · $it" } ?: ""), image = r.image,
-            progress = if (r.durationMs > 0) r.positionMs.toFloat() / r.durationMs else null,
-            onClick = {
-                state.push(Screen.Player(PlayRequest.Vod(r.id, r.title, r.subtitle, r.image, r.url, r.positionMs)))
-            },
+            key = recent.id, title = recent.title, image = recent.image,
+            heroMeta = recent.subtitle,
+            progress = if (recent.durationMs > 0) recent.positionMs.toFloat() / recent.durationMs else 0f,
+            onClick = { state.push(Screen.Player(PlayRequest.Vod(recent.id, recent.title, recent.subtitle, recent.image, recent.url, recent.positionMs))) },
         )
     })
 }
@@ -281,21 +400,18 @@ fun MoviesScreen(state: AppState) {
     val cats by Repo.movieCategories.collectAsState()
     val status by Repo.vodStatus.collectAsState()
     val recents by Repo.prefs.recents.collectAsState()
-
     val rows = remember(movies, cats, recents) {
-        fun item(m: Movie) = BrowseItem(
-            key = m.id, title = m.name, image = m.poster, badge = m.rating?.take(3),
-            movie = m, onClick = { state.push(Screen.MovieDetail(m)) },
+        fun item(movie: Movie) = BrowseItem(
+            key = movie.id, title = movie.name, image = movie.poster, badge = contentRating(movie.rating),
+            movie = movie, onClick = { state.push(Screen.MovieDetail(movie)) },
         )
         buildList {
             recentsRow(recents, listOf("m:", "mu:"), state)?.let { add(it) }
-            if (movies.any { it.added > 0 }) {
-                add(BrowseRow("recent", "Recently Added", movies.sortedByDescending { it.added }.take(40).map(::item)))
-            }
+            if (movies.any { it.added > 0 }) add(BrowseRow("recent", "Recently Added", movies.sortedByDescending { it.added }.take(40).map(::item)))
             addAll(groupRows("c", movies, cats, { it.categoryIds }, ::item))
         }
     }
-    BrowseScreen(state, "movies", rows, state.moviesList, status, "No movies in this playlist")
+    BrowseScreen(state, "movies", rows, state.moviesList, status, "No English movies in this playlist")
 }
 
 @Composable
@@ -303,22 +419,17 @@ fun SeriesScreen(state: AppState) {
     val series by Repo.series.collectAsState()
     val cats by Repo.seriesCategories.collectAsState()
     val status by Repo.seriesStatus.collectAsState()
-    val recents by Repo.prefs.recents.collectAsState()
-
-    val rows = remember(series, cats, recents) {
-        fun item(s: Series) = BrowseItem(
-            key = s.id, title = s.name, image = s.cover, badge = s.rating?.take(3),
-            heroPlot = s.plot, heroBackdrop = s.backdrop,
-            heroMeta = listOfNotNull(s.year, s.genre).joinToString("  ·  ").ifBlank { null },
-            onClick = { state.push(Screen.SeriesDetail(s)) },
+    val rows = remember(series, cats) {
+        fun item(series: Series) = BrowseItem(
+            key = series.id, title = series.name, image = series.cover, badge = contentRating(series.rating),
+            heroPlot = series.plot, heroBackdrop = series.backdrop,
+            heroMeta = listOfNotNull(series.year, series.genre).filter { it.isNotBlank() }.joinToString("  ·  ").ifBlank { null },
+            onClick = { state.push(Screen.SeriesDetail(series)) },
         )
         buildList {
-            recentsRow(recents, listOf("e:"), state)?.let { add(it) }
-            if (series.any { it.added > 0 }) {
-                add(BrowseRow("recent", "Recently Updated", series.sortedByDescending { it.added }.take(40).map(::item)))
-            }
+            if (series.any { it.added > 0 }) add(BrowseRow("recent", "Recently Updated", series.sortedByDescending { it.added }.take(40).map(::item)))
             addAll(groupRows("c", series, cats, { it.categoryIds }, ::item))
         }
     }
-    BrowseScreen(state, "series", rows, state.seriesList, status, "No series in this playlist")
+    BrowseScreen(state, "series", rows, state.seriesList, status, "No English series in this playlist")
 }

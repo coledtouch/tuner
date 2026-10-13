@@ -36,7 +36,11 @@ class Xtream(private val src: Source) {
             val id = o.str("stream_id") ?: return@forEachJsonObject
             val cats = categoriesOf(o)
             val prev = byId[id]
-            if (prev != null) { byId[id] = prev.copy(categoryIds = (prev.categoryIds + cats).distinct()); return@forEachJsonObject }
+            if (prev != null) {
+                byId[id] = prev.copy(categoryIds = (prev.categoryIds + cats).distinct(),
+                    country = mergeMetadata(prev.country, countryOf(o)), language = mergeMetadata(prev.language, languageOf(o)))
+                return@forEachJsonObject
+            }
             val direct = o.str("direct_source")?.takeIf { it.startsWith("http") }
             byId[id] = Channel(
                 key = "x:$id",
@@ -48,6 +52,8 @@ class Xtream(private val src: Source) {
                 streamId = id,
                 url = direct?.let { withExt(it, ext) } ?: live(id, ext),
                 categoryIds = cats,
+                country = countryOf(o),
+                language = languageOf(o),
             )
         }
         return renumber(ArrayList(byId.values))
@@ -60,6 +66,17 @@ class Xtream(private val src: Source) {
         (o["category_ids"] as? List<*>)?.forEach { v -> v?.toString()?.substringBefore('.')?.takeIf { it.isNotBlank() }?.let { if (it !in list) list += it } }
         return list
     }
+
+    private fun metadata(o: JMap, vararg keys: String): String? = keys.flatMap { key ->
+        when (val value = o[key]) {
+            is List<*> -> value.mapNotNull { it?.toString()?.trim()?.takeIf(String::isNotBlank) }
+            else -> listOfNotNull(value?.toString()?.trim()?.takeIf(String::isNotBlank))
+        }
+    }.distinct().joinToString(";").ifBlank { null }
+
+    private fun countryOf(o: JMap) = metadata(o, "country", "country_code", "country_name", "stream_country", "tvg-country")
+    private fun languageOf(o: JMap) = metadata(o, "language", "lang", "original_language", "audio_language", "stream_language", "tvg-language")
+    private fun mergeMetadata(first: String?, second: String?) = listOfNotNull(first, second).distinct().joinToString(";").ifBlank { null }
 
     /** Swaps a live direct_source's extension to the chosen format (ts or m3u8). */
     private fun withExt(url: String, ext: String): String {
@@ -74,7 +91,11 @@ class Xtream(private val src: Source) {
             val id = o.str("stream_id") ?: return@forEachJsonObject
             val cats = categoriesOf(o)
             val prev = byId[id]
-            if (prev != null) { byId[id] = prev.copy(categoryIds = (prev.categoryIds + cats).distinct()); return@forEachJsonObject }
+            if (prev != null) {
+                byId[id] = prev.copy(categoryIds = (prev.categoryIds + cats).distinct(),
+                    country = mergeMetadata(prev.country, countryOf(o)), language = mergeMetadata(prev.language, languageOf(o)))
+                return@forEachJsonObject
+            }
             byId[id] = Movie(
                 id = "m:$id",
                 name = o.str("name") ?: "Movie",
@@ -84,6 +105,8 @@ class Xtream(private val src: Source) {
                 url = o.str("direct_source")?.takeIf { it.startsWith("http") } ?: movie(id, o.str("container_extension") ?: "mp4"),
                 added = o.str("added")?.toLongOrNull() ?: 0,
                 categoryIds = cats,
+                country = countryOf(o),
+                language = languageOf(o),
             )
         }
         return ArrayList(byId.values)
@@ -95,7 +118,11 @@ class Xtream(private val src: Source) {
             val id = o.str("series_id") ?: return@forEachJsonObject
             val cats = categoriesOf(o)
             val prev = byId[id]
-            if (prev != null) { byId[id] = prev.copy(categoryIds = (prev.categoryIds + cats).distinct()); return@forEachJsonObject }
+            if (prev != null) {
+                byId[id] = prev.copy(categoryIds = (prev.categoryIds + cats).distinct(),
+                    country = mergeMetadata(prev.country, countryOf(o)), language = mergeMetadata(prev.language, languageOf(o)))
+                return@forEachJsonObject
+            }
             byId[id] = Series(
                 id = id,
                 name = o.str("name") ?: "Series",
@@ -108,6 +135,8 @@ class Xtream(private val src: Source) {
                 backdrop = o.str("backdrop_path"),
                 added = o.str("last_modified")?.toLongOrNull() ?: 0,
                 categoryIds = cats,
+                country = countryOf(o),
+                language = languageOf(o),
             )
         }
         return ArrayList(byId.values)

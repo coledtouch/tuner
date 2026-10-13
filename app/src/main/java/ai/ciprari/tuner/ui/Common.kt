@@ -37,6 +37,8 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
@@ -64,10 +66,10 @@ data class AppTheme(
 
 object Themes {
     val Midnight = AppTheme(
-        "midnight", "Midnight", bg = Color(0xFF0A0D13), surface = Color(0xFF141A24), surface2 = Color(0xFF1B2230),
-        cell = Color(0xFF171E2B), cellNow = Color(0xFF1F2839), line = Color(0xFF263044),
-        text = Color(0xFFE9EDF5), dim = Color(0xFF8D98AC), faint = Color(0xFF5A6578),
-        accent = Color(0xFF4C9BFF), focus = Color.White, onFocus = Color(0xFF0A0D13),
+        "midnight", "Midnight", bg = Color(0xFF080E1A), surface = Color(0xFF111C2E), surface2 = Color(0xFF1C2B42),
+        cell = Color(0xFF142137), cellNow = Color(0xFF20344F), line = Color(0xFF2C3D57),
+        text = Color(0xFFF1F5FC), dim = Color(0xFFAAB8CE), faint = Color(0xFF7D8EA8),
+        accent = Color(0xFF70B4FF), focus = Color.White, onFocus = Color(0xFF080E1A),
     )
     val Carbon = AppTheme(
         "carbon", "Carbon", bg = Color(0xFF0B0B0C), surface = Color(0xFF161618), surface2 = Color(0xFF202023),
@@ -116,6 +118,7 @@ object Palette {
     val dim get() = theme.dim
     val faint get() = theme.faint
     val accent get() = theme.accent
+    val onAccent get() = if (theme.dark) Color(0xFF08111E) else Color.White
     val focus get() = theme.focus
     val onFocus get() = theme.onFocus
     val live = Color(0xFFFF4D5E)
@@ -146,7 +149,7 @@ fun FocusBox(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     shape: Shape = RoundedCornerShape(10.dp),
-    focusedScale: Float = 1.05f,
+    focusedScale: Float = 1.035f,
     color: Color = Palette.surface,
     focusedColor: Color = color,
     ring: Boolean = true,
@@ -155,7 +158,7 @@ fun FocusBox(
     content: @Composable BoxScope.(focused: Boolean) -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(if (focused) focusedScale else 1f, tween(140), label = "scale")
+    val scale by animateFloatAsState(if (focused) focusedScale else 1f, tween(120), label = "scale")
     val interaction = remember { MutableInteractionSource() }
     Box(
         modifier
@@ -166,6 +169,7 @@ fun FocusBox(
             .then(if (focused && ring) Modifier.border(2.5.dp, Palette.focus, shape) else Modifier)
             .combinedClickable(
                 interactionSource = interaction, indication = null,
+                role = Role.Button,
                 onClick = onClick, onLongClick = onLongClick,
             ),
     ) { content(focused) }
@@ -185,12 +189,12 @@ fun PillButton(
         onClick = onClick,
         modifier = modifier,
         shape = RoundedCornerShape(50),
-        color = if (primary) Palette.accent.copy(alpha = 0.22f) else Palette.surface2,
+        color = if (primary) Palette.accent else Palette.surface2,
         focusedColor = Palette.focus,
         ring = false,
         onFocus = onFocus,
     ) { f ->
-        val c = if (f) Palette.onFocus else Palette.text
+        val c = when { f -> Palette.onFocus; primary -> Palette.onAccent; else -> Palette.text }
         Row(
             Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -220,11 +224,11 @@ fun LoadingMessage(text: String) {
 @Composable
 fun EmptyMessage(title: String, body: String? = null) {
     Centered {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(title, color = Palette.text, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+        Column(Modifier.padding(horizontal = 32.dp, vertical = 20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(title, color = Palette.text, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
             if (body != null) Text(
                 body, color = Palette.dim, fontSize = 14.sp, maxLines = 3, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 8.dp),
+                modifier = Modifier.padding(top = 8.dp), textAlign = TextAlign.Center,
             )
         }
     }

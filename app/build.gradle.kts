@@ -1,8 +1,21 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+// Shared across build machines, kept alongside the checkout rather than in source control.
+val releasePropertiesFile = providers.gradleProperty("tunerSigningProperties").orNull?.let { file(it) }
+    ?: System.getenv("TUNER_SIGNING_DIR")?.let { file("$it/keystore.properties") }
+    ?: rootProject.projectDir.parentFile.resolve("signing/keystore.properties")
+val releaseProperties = Properties().apply {
+    if (releasePropertiesFile.isFile) releasePropertiesFile.inputStream().use { load(it) }
+}
+val testJavaExecutable = providers.gradleProperty("tunerTestJavaExecutable").orNull
+fun signingValue(name: String): String = releaseProperties.getProperty(name)?.takeIf { it.isNotBlank() }
+    ?: error("Missing $name in the external release signing properties")
 
 android {
     namespace = "ai.ciprari.tuner"
@@ -12,18 +25,28 @@ android {
         applicationId = "ai.ciprari.tuner"
         minSdk = 23
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.0.2"
+        versionCode = 4
+        versionName = "1.1.0"
     }
 
+    signingConfigs {
+        if (releasePropertiesFile.isFile) create("release") {
+            val configuredStore = File(signingValue("storeFile"))
+            storeFile = if (configuredStore.isAbsolute) configuredStore
+                else releasePropertiesFile.parentFile.resolve(configuredStore.path)
+            require(storeFile!!.isFile) { "The external release keystore does not exist" }
+            storePassword = signingValue("storePassword")
+            keyAlias = signingValue("keyAlias")
+            keyPassword = signingValue("keyPassword")
+        }
+    }
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // Signed with the debug key so the release APK installs straight away.
-            // Swap in your own keystore before publishing anywhere.
-            signingConfig = signingConfigs.getByName("debug")
+            // Without the shared key, produce an unsigned release instead of inventing a new key.
+            signingConfig = signingConfigs.findByName("release")
         }
     }
     compileOptions {
@@ -35,6 +58,8 @@ android {
     testOptions {
         unitTests.isIncludeAndroidResources = true
         unitTests.all {
+            // Windows ARM can run Gradle natively and only emulate the x64 Robolectric JVM.
+            testJavaExecutable?.let { executable -> it.executable = executable }
             it.systemProperty("robolectric.dependency.repo.url", System.getenv("MAVEN_MIRROR") ?: "https://repo1.maven.org/maven2")
             it.maxHeapSize = "3g"
             System.getenv("FREE_EPG")?.let { f -> it.systemProperty("free.epg", f) }

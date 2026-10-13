@@ -116,8 +116,9 @@ object Repo {
         try {
             val catsF = async { Net.download(x.api("get_live_categories"), ua, File(dir, "live_cats.json"), LIST_AGE, false) }
             val listF = async { Net.download(x.api("get_live_streams"), ua, File(dir, "live.json"), LIST_AGE, false) }
-            liveCategories.value = x.parseCategories(catsF.await())
-            channels.value = x.parseLive(listF.await(), prefs.liveFormat)
+            val catalogue = ContentPolicy.live(x.parseLive(listF.await(), prefs.liveFormat), x.parseCategories(catsF.await()))
+            liveCategories.value = catalogue.categories
+            channels.value = catalogue.items
             liveStatus.value = LoadStatus.Ready
         } catch (e: Exception) {
             liveStatus.value = LoadStatus.Error(friendly(e))
@@ -131,8 +132,9 @@ object Repo {
             try {
                 val c = async { Net.download(x.api("get_vod_categories"), ua, File(dir, "vod_cats.json"), LIST_AGE, false) }
                 val l = async { Net.download(x.api("get_vod_streams"), ua, File(dir, "vod.json"), LIST_AGE, false) }
-                movieCategories.value = x.parseCategories(c.await())
-                movies.value = x.parseMovies(l.await())
+                val catalogue = ContentPolicy.movies(x.parseMovies(l.await()), x.parseCategories(c.await()))
+                movieCategories.value = catalogue.categories
+                movies.value = catalogue.items
                 vodStatus.value = LoadStatus.Ready
             } catch (e: Exception) { vodStatus.value = LoadStatus.Error(friendly(e)) }
         }
@@ -142,8 +144,9 @@ object Repo {
             try {
                 val c = async { Net.download(x.api("get_series_categories"), ua, File(dir, "series_cats.json"), LIST_AGE, false) }
                 val l = async { Net.download(x.api("get_series"), ua, File(dir, "series.json"), LIST_AGE, false) }
-                seriesCategories.value = x.parseCategories(c.await())
-                series.value = x.parseSeries(l.await())
+                val catalogue = ContentPolicy.series(x.parseSeries(l.await()), x.parseCategories(c.await()))
+                seriesCategories.value = catalogue.categories
+                series.value = catalogue.items
                 seriesStatus.value = LoadStatus.Ready
             } catch (e: Exception) { seriesStatus.value = LoadStatus.Error(friendly(e)) }
         }
@@ -156,10 +159,12 @@ object Repo {
         try {
             val f = Net.download(src.m3uUrl, src.userAgent, File(dir, "playlist.m3u"), LIST_AGE, false)
             val r = M3u.parse(f)
-            liveCategories.value = r.liveCategories
-            channels.value = r.channels
-            movieCategories.value = r.movieCategories
-            movies.value = r.movies
+            val live = ContentPolicy.live(r.channels, r.liveCategories)
+            val vod = ContentPolicy.movies(r.movies, r.movieCategories)
+            liveCategories.value = live.categories
+            channels.value = live.items
+            movieCategories.value = vod.categories
+            movies.value = vod.items
             liveStatus.value = LoadStatus.Ready
             vodStatus.value = LoadStatus.Ready
             launch { loadTrending(src, dir) }
@@ -180,7 +185,9 @@ object Repo {
         if (src.hotUrl.isBlank()) return
         runCatching {
             val f = Net.download(src.hotUrl, src.userAgent, File(dir, "trending.m3u"), 20 * 60_000L, false)
-            val parsed = M3u.parse(f).channels.sortedBy { it.key.substringAfterLast(':').toIntOrNull() ?: 0 }
+            val playlist = M3u.parse(f)
+            val parsed = ContentPolicy.live(playlist.channels, playlist.liveCategories).items
+                .sortedBy { it.key.substringAfterLast(':').toIntOrNull() ?: 0 }
             fun sid(url: String) = url.substringBefore('?').substringAfterLast('/').substringBefore('.')
             val known = channels.value.associateBy { it.streamId ?: sid(it.url) }
             var extra = (channels.value.maxOfOrNull { it.number } ?: 0) + 1

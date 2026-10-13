@@ -29,6 +29,8 @@ data class Channel(
     val url: String,
     /** Every category the provider lists this channel under (Xtream can repeat items per category). */
     val categoryIds: List<String> = listOf(categoryId),
+    val country: String? = null,
+    val language: String? = null,
 )
 
 data class Movie(
@@ -40,6 +42,8 @@ data class Movie(
     val url: String,
     val added: Long = 0,
     val categoryIds: List<String> = listOf(categoryId),
+    val country: String? = null,
+    val language: String? = null,
 )
 
 data class Series(
@@ -54,6 +58,8 @@ data class Series(
     val backdrop: String?,
     val added: Long = 0,
     val categoryIds: List<String> = listOf(categoryId),
+    val country: String? = null,
+    val language: String? = null,
 )
 
 data class Episode(
