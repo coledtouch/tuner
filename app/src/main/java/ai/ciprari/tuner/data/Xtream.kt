@@ -23,7 +23,7 @@ class Xtream(private val src: Source) {
 
     fun parseCategories(file: File): List<Category> {
         val out = ArrayList<Category>()
-        forEachJsonObject(file) { o ->
+        forEachJsonObject(file, CATEGORY_FIELDS) { o ->
             val id = o.str("category_id") ?: return@forEachJsonObject
             out += Category(id, o.str("category_name") ?: "Other")
         }
@@ -32,7 +32,7 @@ class Xtream(private val src: Source) {
 
     fun parseLive(file: File, ext: String): List<Channel> {
         val byId = LinkedHashMap<String, Channel>(8192)
-        forEachJsonObject(file) { o ->
+        forEachJsonObject(file, LIVE_FIELDS) { o ->
             val id = o.str("stream_id") ?: return@forEachJsonObject
             val cats = categoriesOf(o)
             val prev = byId[id]
@@ -67,16 +67,32 @@ class Xtream(private val src: Source) {
         return list
     }
 
-    private fun metadata(o: JMap, vararg keys: String): String? = keys.flatMap { key ->
-        when (val value = o[key]) {
-            is List<*> -> value.mapNotNull { it?.toString()?.trim()?.takeIf(String::isNotBlank) }
-            else -> listOfNotNull(value?.toString()?.trim()?.takeIf(String::isNotBlank))
+    private fun metadata(o: JMap, keys: List<String>): String? {
+        var values: LinkedHashSet<String>? = null
+        for (key in keys) {
+            val value = o[key] ?: continue
+            if (value is List<*>) {
+                for (item in value) {
+                    val text = item?.toString()?.trim()?.takeIf(String::isNotBlank) ?: continue
+                    if (values == null) values = LinkedHashSet()
+                    values.add(text)
+                }
+            } else {
+                val text = value.toString().trim().takeIf(String::isNotBlank) ?: continue
+                if (values == null) values = LinkedHashSet()
+                values.add(text)
+            }
         }
-    }.distinct().joinToString(";").ifBlank { null }
+        return values?.joinToString(";")
+    }
 
-    private fun countryOf(o: JMap) = metadata(o, "country", "country_code", "country_name", "stream_country", "tvg-country")
-    private fun languageOf(o: JMap) = metadata(o, "language", "lang", "original_language", "audio_language", "stream_language", "tvg-language")
-    private fun mergeMetadata(first: String?, second: String?) = listOfNotNull(first, second).distinct().joinToString(";").ifBlank { null }
+    private fun countryOf(o: JMap) = metadata(o, COUNTRY_FIELDS)
+    private fun languageOf(o: JMap) = metadata(o, LANGUAGE_FIELDS)
+    private fun mergeMetadata(first: String?, second: String?): String? = when {
+        first == null -> second
+        second == null || first == second -> first
+        else -> "$first;$second"
+    }
 
     /** Swaps a live direct_source's extension to the chosen format (ts or m3u8). */
     private fun withExt(url: String, ext: String): String {
@@ -87,7 +103,7 @@ class Xtream(private val src: Source) {
 
     fun parseMovies(file: File): List<Movie> {
         val byId = LinkedHashMap<String, Movie>(16384)
-        forEachJsonObject(file) { o ->
+        forEachJsonObject(file, MOVIE_FIELDS) { o ->
             val id = o.str("stream_id") ?: return@forEachJsonObject
             val cats = categoriesOf(o)
             val prev = byId[id]
@@ -114,7 +130,7 @@ class Xtream(private val src: Source) {
 
     fun parseSeries(file: File): List<Series> {
         val byId = LinkedHashMap<String, Series>(8192)
-        forEachJsonObject(file) { o ->
+        forEachJsonObject(file, SERIES_FIELDS) { o ->
             val id = o.str("series_id") ?: return@forEachJsonObject
             val cats = categoriesOf(o)
             val prev = byId[id]
@@ -222,6 +238,14 @@ class Xtream(private val src: Source) {
     }?.trim()?.ifBlank { null }
 
     companion object {
+        private val COUNTRY_FIELDS = listOf("country", "country_code", "country_name", "stream_country", "tvg-country")
+        private val LANGUAGE_FIELDS = listOf("language", "lang", "original_language", "audio_language", "stream_language", "tvg-language")
+        private val COMMON_FIELDS = (COUNTRY_FIELDS + LANGUAGE_FIELDS + listOf("name", "category_id", "category_ids")).toSet()
+        private val CATEGORY_FIELDS = setOf("category_id", "category_name")
+        private val LIVE_FIELDS = COMMON_FIELDS + setOf("stream_id", "num", "stream_icon", "epg_channel_id", "direct_source")
+        private val MOVIE_FIELDS = COMMON_FIELDS + setOf("stream_id", "stream_icon", "rating", "direct_source", "container_extension", "added")
+        private val SERIES_FIELDS = COMMON_FIELDS + setOf("series_id", "cover", "plot", "rating", "genre", "releaseDate", "release_date", "backdrop_path", "last_modified")
+
         fun normalizeServer(raw: String): String {
             var s = raw.trim()
             if (!s.startsWith("http://", true) && !s.startsWith("https://", true)) s = "http://$s"

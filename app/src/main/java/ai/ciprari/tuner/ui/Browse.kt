@@ -41,6 +41,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -54,10 +55,15 @@ import ai.ciprari.tuner.data.PlayRequest
 import ai.ciprari.tuner.data.Recent
 import ai.ciprari.tuner.data.Repo
 import ai.ciprari.tuner.data.Series
+import ai.ciprari.tuner.data.Source
 import coil.compose.AsyncImage
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.util.Locale
+import kotlinx.coroutines.withContext
+import java.math.BigDecimal
+import java.math.RoundingMode
+import kotlin.math.floor
 
 data class BrowseItem(
     val key: String,
@@ -77,7 +83,45 @@ data class BrowseRow(val key: String, val title: String, val items: List<BrowseI
 
 internal fun contentRating(value: String?): String? {
     val rating = value?.trim()?.toFloatOrNull()?.takeIf { it > 0f && it.isFinite() } ?: return null
-    return String.format(Locale.US, "%.1f", rating).removeSuffix(".0")
+    val number = rating.toDouble()
+    if (number > 1_000_000.0) return BigDecimal.valueOf(number).setScale(1, RoundingMode.HALF_UP).toPlainString().removeSuffix(".0")
+    val tenths = floor(number * 10 + 0.5).toLong()
+    val decimal = tenths % 10
+    return (tenths / 10).toString() + if (decimal == 0L) "" else ".$decimal"
+}
+
+internal data class BrowsePosition(val row: Int, val item: Int)
+internal data class PreparedBrowse(
+    val rows: List<BrowseRow>, val itemsByKey: Map<String, BrowseItem>, val positions: Map<String, BrowsePosition>,
+)
+
+internal fun prepareBrowse(prefix: String, rows: List<BrowseRow>): PreparedBrowse {
+    val display = rows.distinctBy { it.key }.map { it.copy(items = it.items.distinctBy { item -> item.key }) }
+        .filter { it.items.isNotEmpty() }
+    val index = HashMap<String, BrowseItem>()
+    val positions = HashMap<String, BrowsePosition>()
+    display.forEachIndexed { rowIndex, row -> row.items.forEachIndexed { itemIndex, item ->
+        val key = "$prefix:${row.key}:${item.key}"
+        index[key] = item
+        positions[key] = BrowsePosition(rowIndex, itemIndex)
+    } }
+    return PreparedBrowse(display, index, positions)
+}
+
+private class BrowseInput<T>(val source: Source?, val items: List<T>, val categories: List<Category>, val recents: List<Recent>)
+private class PreparedResult(val source: Source?, val input: Any, val browse: PreparedBrowse)
+private data class RefreshFocus(val key: String?, val navigationRequest: Int)
+
+@Composable
+private fun rememberPreparedBrowse(prefix: String, source: Source?, input: Any, current: () -> Boolean, rows: () -> List<BrowseRow>): PreparedBrowse? {
+    var completed by remember(prefix) { mutableStateOf<PreparedResult?>(null) }
+    LaunchedEffect(prefix, input) {
+        val prepared = withContext(Dispatchers.Default) { prepareBrowse(prefix, rows()) }
+        if (current()) completed = PreparedResult(source, input, prepared)
+    }
+    // Keep usable cards and their focus while this same account prepares a refresh. Source
+    // compares the full configuration so changed credentials never expose an old library.
+    return completed?.takeIf { it.input === input || it.source == source }?.browse
 }
 
 /** Keep the focused card clear of the screen edge, including its focus ring. */
@@ -90,9 +134,10 @@ private fun pivotSpec(fraction: Float) = object : BringIntoViewSpec {
 }
 
 /** Lazy cards may be composed a frame after their row is scrolled back into view. */
-internal suspend fun requestAttachedFocus(requester: FocusRequester): Boolean {
+internal suspend fun requestAttachedFocus(requester: FocusRequester, allowed: () -> Boolean = { true }): Boolean {
     repeat(12) {
         withFrameNanos { }
+        if (!allowed()) return false
         if (runCatching { requester.requestFocus() }.isSuccess) return true
     }
     return false
@@ -108,29 +153,47 @@ fun BrowseScreen(
     status: LoadStatus,
     emptyTitle: String,
 ) {
-    val displayRows = remember(rows) {
-        rows.distinctBy { it.key }.map { it.copy(items = it.items.distinctBy { item -> item.key }) }
-            .filter { it.items.isNotEmpty() }
-    }
-    val itemsByKey = remember(prefix, displayRows) {
-        displayRows.asSequence().flatMap { row ->
-            row.items.asSequence().map { item -> "$prefix:${row.key}:${item.key}" to item }
-        }.toMap()
-    }
+    val source = browseSource()
+    val input = remember(prefix, source, rows) { Any() }
+    val prepared = rememberPreparedBrowse(prefix, source, input, { Repo.activeSource == source }) { rows }
+    BrowseContent(state, prefix, prepared, listState, status, emptyTitle)
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun BrowseContent(
+    state: AppState, prefix: String, prepared: PreparedBrowse?, listState: LazyListState,
+    status: LoadStatus, emptyTitle: String,
+) {
+    val displayRows = prepared?.rows.orEmpty()
+    val itemsByKey = prepared?.itemsByKey.orEmpty()
     var heroKey by remember(prefix) { mutableStateOf<String?>(null) }
     var activeRow by remember(prefix) { mutableStateOf<String?>(null) }
+    var focusedCardKey by remember(prefix) { mutableStateOf<String?>(null) }
     val requesters = remember(prefix) { mutableMapOf<String, FocusRequester>() }
     val scope = rememberCoroutineScope()
 
     fun cardKey(row: BrowseRow, item: BrowseItem) = "$prefix:${row.key}:${item.key}"
 
+    // Capture before applying new lazy rows, while a removed card still owns focus. A new
+    // navigation request or a user-selected card always takes precedence over this fallback.
+    val refreshFocus = remember(prepared) { RefreshFocus(focusedCardKey, state.navigationRequest) }
+    LaunchedEffect(prepared) {
+        val key = refreshFocus.key
+        if (prepared != null && key != null && state.lastFocusedKey == key &&
+            state.top == Screen.Home && !state.navigationFocused &&
+            state.navigationRequest == refreshFocus.navigationRequest && state.navigationRequest == state.handledNavigationRequest) {
+            if (prepared.rows.isEmpty()) state.requestNavigation() else state.restoreFocus = true
+        }
+    }
+
     LaunchedEffect(state.restoreFocus, displayRows) {
         if (!state.restoreFocus || displayRows.isEmpty()) return@LaunchedEffect
-        val rowIndex = displayRows.indexOfFirst { row ->
-            row.items.any { cardKey(row, it) == state.lastFocusedKey }
-        }.coerceAtLeast(0)
+        val previousKey = state.lastFocusedKey
+        val position = previousKey?.let { prepared?.positions?.get(it) }
+        val rowIndex = position?.row ?: 0
         val row = displayRows[rowIndex]
-        val cardIndex = row.items.indexOfFirst { cardKey(row, it) == state.lastFocusedKey }.coerceAtLeast(0)
+        val cardIndex = position?.item ?: 0
         val key = cardKey(row, row.items[cardIndex])
         val requester = requesters.getOrPut(key) { FocusRequester() }
         // Reused list states retain their last layout info after leaving the screen. Let the new
@@ -141,9 +204,13 @@ fun BrowseScreen(
         withFrameNanos { }
         val rowState = state.rowState("$prefix:${row.key}")
         if (rowState.layoutInfo.visibleItemsInfo.none { it.index == cardIndex }) rowState.scrollToItem(cardIndex)
-        if (state.restoreFocus && requestAttachedFocus(requester)) state.restoreFocus = false
+        if (requestAttachedFocus(requester) { state.restoreFocus && state.lastFocusedKey == previousKey }) state.restoreFocus = false
     }
 
+    if (prepared == null) {
+        Box(Modifier.fillMaxSize().testTag("browse-preparing:$prefix")) { LoadingMessage("Preparing your library…") }
+        return
+    }
     if (displayRows.isEmpty()) {
         when (status) {
             is LoadStatus.Loading -> LoadingMessage(status.message)
@@ -153,7 +220,7 @@ fun BrowseScreen(
         return
     }
 
-    BoxWithConstraints(Modifier.fillMaxSize()) {
+    BoxWithConstraints(Modifier.fillMaxSize().testTag("browse-content:$prefix")) {
         val compact = maxHeight < 420.dp || maxWidth < 760.dp
         val dense = maxHeight < 330.dp
         val inset = if (compact) 20.dp else 28.dp
@@ -236,10 +303,15 @@ fun BrowseScreen(
                                             modifier = Modifier.focusRequester(requesters.getOrPut(key) { FocusRequester() }),
                                             width = posterWidth,
                                             compact = compact,
+                                            onFocusChanged = { focused ->
+                                                if (focused) focusedCardKey = key
+                                                else if (focusedCardKey == key) focusedCardKey = null
+                                            },
                                             onFocused = {
                                                 heroKey = key
                                                 activeRow = row.key
                                                 state.lastFocusedKey = key
+                                                state.restoreFocus = false
                                             },
                                         )
                                     }
@@ -254,7 +326,7 @@ fun BrowseScreen(
 }
 
 @Composable
-private fun PosterCard(item: BrowseItem, modifier: Modifier, onFocused: () -> Unit, width: Dp, compact: Boolean) {
+private fun PosterCard(item: BrowseItem, modifier: Modifier, onFocused: () -> Unit, onFocusChanged: (Boolean) -> Unit, width: Dp, compact: Boolean) {
     FocusBox(
         onClick = item.onClick,
         modifier = modifier.width(width),
@@ -262,7 +334,7 @@ private fun PosterCard(item: BrowseItem, modifier: Modifier, onFocused: () -> Un
         color = Palette.surface,
         focusedColor = Palette.surface2,
         focusedScale = 1.045f,
-        onFocus = { if (it) onFocused() },
+        onFocus = { onFocusChanged(it); if (it) onFocused() },
     ) { focused ->
         Column {
             Box(Modifier.fillMaxWidth().height(width * 1.48f).clip(RoundedCornerShape(topStart = 10.dp, topEnd = 10.dp)).background(Brush.linearGradient(listOf(Palette.accent.copy(alpha = 0.14f), Palette.surface2, Palette.surface)))) {
@@ -389,18 +461,63 @@ fun recentsRow(recents: List<Recent>, kindPrefix: List<String>, state: AppState)
         else eligibleMovieRecents(recents, Repo.movies.value)
     val list = current
         .filter { recent -> kindPrefix.any { recent.id.startsWith(it) } }
+    return resumeBrowseRow(list) { recent ->
+        val movie = Repo.movies.value.firstOrNull { it.id == recent.id && it.url == recent.url }
+        state.push(Screen.Player(PlayRequest.Vod(recent.id, recent.title, recent.subtitle, recent.image, recent.url, recent.positionMs, streamBackups = movie?.backups.orEmpty())))
+    }
+}
+
+private fun resumeBrowseRow(list: List<Recent>, onResume: (Recent) -> Unit): BrowseRow? {
     if (list.isEmpty()) return null
     return BrowseRow("continue", "Continue Watching", list.map { recent ->
         BrowseItem(
             key = recent.id, title = recent.title, image = recent.image,
             heroMeta = recent.subtitle,
             progress = if (recent.durationMs > 0) recent.positionMs.toFloat() / recent.durationMs else 0f,
-            onClick = {
-                val movie = Repo.movies.value.firstOrNull { it.id == recent.id && it.url == recent.url }
-                state.push(Screen.Player(PlayRequest.Vod(recent.id, recent.title, recent.subtitle, recent.image, recent.url, recent.positionMs, streamBackups = movie?.backups.orEmpty())))
-            },
+            onClick = { onResume(recent) },
         )
     })
+}
+
+internal fun movieBrowseRows(
+    movies: List<Movie>, cats: List<Category>, recents: List<Recent>,
+    onMovie: (Movie) -> Unit, onResume: (Recent) -> Unit,
+): List<BrowseRow> {
+    val items = HashMap<String, BrowseItem>()
+    fun item(movie: Movie) = items.getOrPut(movie.id) {
+        BrowseItem(key = movie.id, title = movie.name, image = movie.poster, badge = contentRating(movie.rating),
+            movie = movie, onClick = { onMovie(movie) })
+    }
+    return buildList {
+        resumeBrowseRow(eligibleMovieRecents(recents, movies).filter { it.id.startsWith("m:") || it.id.startsWith("mu:") }, onResume)?.let { add(it) }
+        if (movies.any { it.added > 0 }) add(BrowseRow("recent", "Recently Added", movies.sortedByDescending { it.added }.take(40).map(::item)))
+        addAll(groupRows("c", movies, cats, { it.categoryIds }, ::item))
+    }
+}
+
+internal fun seriesBrowseRows(
+    series: List<Series>, cats: List<Category>, recents: List<Recent>,
+    onSeries: (Series) -> Unit, onResume: (Recent) -> Unit,
+): List<BrowseRow> {
+    val items = HashMap<String, BrowseItem>()
+    fun item(series: Series) = items.getOrPut(series.id) {
+        BrowseItem(key = series.id, title = series.name, image = series.cover, badge = contentRating(series.rating),
+            heroPlot = series.plot, heroBackdrop = series.backdrop,
+            heroMeta = listOfNotNull(series.year, series.genre).filter { it.isNotBlank() }.joinToString("  ·  ").ifBlank { null },
+            onClick = { onSeries(series) })
+    }
+    return buildList {
+        resumeBrowseRow(eligibleSeriesRecents(recents, series), onResume)?.let { add(it) }
+        if (series.any { it.added > 0 }) add(BrowseRow("recent", "Recently Updated", series.sortedByDescending { it.added }.take(40).map(::item)))
+        addAll(groupRows("c", series, cats, { it.categoryIds }, ::item))
+    }
+}
+
+@Composable
+private fun browseSource(): Source? {
+    val active by Repo.prefs.activeId.collectAsState()
+    val sources by Repo.prefs.sources.collectAsState()
+    return remember(active, sources) { sources.firstOrNull { it.id == active } }
 }
 
 @Composable
@@ -409,18 +526,23 @@ fun MoviesScreen(state: AppState) {
     val cats by Repo.movieCategories.collectAsState()
     val status by Repo.vodStatus.collectAsState()
     val recents by Repo.prefs.recents.collectAsState()
-    val rows = remember(movies, cats, recents) {
-        fun item(movie: Movie) = BrowseItem(
-            key = movie.id, title = movie.name, image = movie.poster, badge = contentRating(movie.rating),
-            movie = movie, onClick = { state.push(Screen.MovieDetail(movie)) },
-        )
-        buildList {
-            recentsRow(recents, listOf("m:", "mu:"), state)?.let { add(it) }
-            if (movies.any { it.added > 0 }) add(BrowseRow("recent", "Recently Added", movies.sortedByDescending { it.added }.take(40).map(::item)))
-            addAll(groupRows("c", movies, cats, { it.categoryIds }, ::item))
-        }
+    val source = browseSource()
+    val input = remember(source, movies, cats, recents) { BrowseInput(source, movies, cats, recents) }
+    val prepared = rememberPreparedBrowse("movies", source, input, {
+        Repo.activeSource == input.source && Repo.movies.value === input.items &&
+            Repo.movieCategories.value === input.categories && Repo.prefs.recents.value === input.recents
+    }) {
+        movieBrowseRows(input.items, input.categories, input.recents, onMovie = { movie ->
+            if (Repo.activeSource == input.source && Repo.movies.value.any { it.id == movie.id && it.url == movie.url }) state.push(Screen.MovieDetail(movie))
+            else Toasts.show("This movie changed. Open the library again.")
+        }, onResume = { recent ->
+            val movie = Repo.movies.value.firstOrNull { it.id == recent.id && it.url == recent.url }
+            if (Repo.activeSource == input.source && movie != null) {
+                state.push(Screen.Player(PlayRequest.Vod(recent.id, recent.title, recent.subtitle, recent.image, recent.url, recent.positionMs, streamBackups = movie.backups)))
+            } else Toasts.show("This movie changed. Open the library again.")
+        })
     }
-    BrowseScreen(state, "movies", rows, state.moviesList, status, "No movies in this playlist")
+    BrowseContent(state, "movies", prepared, state.moviesList, status, "No movies in this playlist")
 }
 
 @Composable
@@ -429,18 +551,20 @@ fun SeriesScreen(state: AppState) {
     val cats by Repo.seriesCategories.collectAsState()
     val status by Repo.seriesStatus.collectAsState()
     val recents by Repo.prefs.recents.collectAsState()
-    val rows = remember(series, cats, recents) {
-        fun item(series: Series) = BrowseItem(
-            key = series.id, title = series.name, image = series.cover, badge = contentRating(series.rating),
-            heroPlot = series.plot, heroBackdrop = series.backdrop,
-            heroMeta = listOfNotNull(series.year, series.genre).filter { it.isNotBlank() }.joinToString("  ·  ").ifBlank { null },
-            onClick = { state.push(Screen.SeriesDetail(series)) },
-        )
-        buildList {
-            recentsRow(recents, listOf("e:"), state)?.let { add(it) }
-            if (series.any { it.added > 0 }) add(BrowseRow("recent", "Recently Updated", series.sortedByDescending { it.added }.take(40).map(::item)))
-            addAll(groupRows("c", series, cats, { it.categoryIds }, ::item))
-        }
+    val source = browseSource()
+    val input = remember(source, series, cats, recents) { BrowseInput(source, series, cats, recents) }
+    val prepared = rememberPreparedBrowse("series", source, input, {
+        Repo.activeSource == input.source && Repo.series.value === input.items &&
+            Repo.seriesCategories.value === input.categories && Repo.prefs.recents.value === input.recents
+    }) {
+        seriesBrowseRows(input.items, input.categories, input.recents, onSeries = { show ->
+            if (Repo.activeSource == input.source && Repo.series.value.any { it.id == show.id }) state.push(Screen.SeriesDetail(show))
+            else Toasts.show("This series changed. Open the library again.")
+        }, onResume = { recent ->
+            if (Repo.activeSource == input.source && eligibleSeriesRecents(listOf(recent), Repo.series.value).isNotEmpty()) {
+                state.push(Screen.Player(PlayRequest.Vod(recent.id, recent.title, recent.subtitle, recent.image, recent.url, recent.positionMs)))
+            } else Toasts.show("This series changed. Open the library again.")
+        })
     }
-    BrowseScreen(state, "series", rows, state.seriesList, status, "No series in this playlist")
+    BrowseContent(state, "series", prepared, state.seriesList, status, "No series in this playlist")
 }

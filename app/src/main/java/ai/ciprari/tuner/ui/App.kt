@@ -37,7 +37,7 @@ sealed interface Screen {
     data class Player(val request: PlayRequest) : Screen
 }
 
-enum class Tab(val title: String) { GUIDE("Live TV"), MOVIES("Movies"), SERIES("Series"), STREAMING("Streaming"), SEARCH("Search"), SETTINGS("Settings") }
+enum class Tab(val title: String) { GUIDE("Live TV"), MOVIES("Movies"), SERIES("Series"), MULTIVIEW("Multi View"), STREAMING("Streaming"), SEARCH("Search"), SETTINGS("Settings") }
 
 /** Screen-independent state that has to survive navigating to a detail page or the player and back. */
 class AppState {
@@ -50,6 +50,7 @@ class AppState {
     val stack = mutableStateListOf<Screen>(Screen.Home)
     var tab by mutableStateOf(Tab.GUIDE)
     val guide = GuideState()
+    val multiView = MultiViewUiState()
     val moviesList = LazyListState()
     val seriesList = LazyListState()
     private val rowStates = HashMap<String, LazyListState>()
@@ -91,7 +92,7 @@ fun App() {
         if (sources.isEmpty()) state.replaceAll(Screen.EditSource(null))
         else Repo.load()
     }
-    LaunchedEffect(activeId) { state.guide.reset() }
+    LaunchedEffect(activeId) { state.guide.reset(); state.multiView.reset() }
 
     BackHandler(enabled = state.stack.size > 1 && state.top !is Screen.Player) { state.pop() }
 

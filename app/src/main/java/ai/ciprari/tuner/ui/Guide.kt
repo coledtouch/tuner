@@ -150,6 +150,15 @@ internal class GuidePreviewSession {
     }
 }
 
+/** Resolve personal history against today's allowed lineup, with provider picks for a new library. */
+internal fun mostWatchedLineup(channels: List<Channel>, trending: List<Channel>, watchedKeys: List<String>): List<Channel> {
+    if (watchedKeys.isEmpty()) return trending.distinctBy { it.key }
+    val byKey = channels.associateByTo(HashMap()) { it.key }
+    trending.forEach { channel -> if (!byKey.containsKey(channel.key)) byKey[channel.key] = channel }
+    val personal = watchedKeys.distinct().mapNotNull(byKey::get).take(50)
+    return personal.ifEmpty { trending.distinctBy { it.key } }
+}
+
 fun floor30(t: Long) = t - t % SLOT
 
 /** Guide position that survives leaving the guide (detail pages, full-screen player). */
@@ -218,6 +227,7 @@ fun GuideScreen(state: AppState) {
     val categories by Repo.liveCategories.collectAsState()
     val favorites by Repo.prefs.favorites.collectAsState()
     val trending by Repo.trending.collectAsState()
+    val watchedKeys by Repo.prefs.watchedChannelKeys.collectAsState()
     val epgVersion by Repo.epgVersion.collectAsState()
     val status by Repo.liveStatus.collectAsState()
     val now = rememberNow(30_000)
@@ -234,10 +244,11 @@ fun GuideScreen(state: AppState) {
     var watchedChannel by remember { mutableStateOf<Channel?>(null) }
     val base = remember { floor30(System.currentTimeMillis()) - 6 * HOUR }
 
-    val lineup = remember(all, g.category, favorites, trending) {
+    val mostWatched = remember(all, trending, watchedKeys) { mostWatchedLineup(all, trending, watchedKeys) }
+    val lineup = remember(all, g.category, favorites, trending, mostWatched) {
         when (g.category) {
             CAT_ALL -> all
-            CAT_HOT -> trending
+            CAT_HOT -> mostWatched
             CAT_FAV -> (all + trending).filter { it.key in favorites }.distinctBy { it.key }
             else -> all.filter { g.category in it.categoryIds }
         }
@@ -266,12 +277,12 @@ fun GuideScreen(state: AppState) {
             if (g.pendingChannelKey == null && g.selectedChannelKey == null) g.pendingChannelKey = Repo.prefs.lastChannelKey
         }
     }
-    LaunchedEffect(lineup, g.pendingChannelKey, g.category) {
+    LaunchedEffect(lineup, mostWatched, g.pendingChannelKey, g.category) {
         val pending = g.pendingChannelKey
         val key = pending ?: g.selectedChannelKey
         var idx = lineup.indexOfFirst { it.key == key }
         if (pending != null && idx < 0 && all.any { it.key == key } && g.category != CAT_ALL) { g.category = CAT_ALL; return@LaunchedEffect }
-        if (pending != null && idx < 0 && trending.any { it.key == key } && g.category != CAT_HOT) { g.category = CAT_HOT; return@LaunchedEffect }
+        if (pending != null && idx < 0 && mostWatched.any { it.key == key } && g.category != CAT_HOT) { g.category = CAT_HOT; return@LaunchedEffect }
         if (lineup.isEmpty()) return@LaunchedEffect
         if (idx < 0) idx = if (pending == null) g.row.coerceIn(0, lineup.lastIndex) else 0
         val moved = g.row != idx
@@ -291,7 +302,7 @@ fun GuideScreen(state: AppState) {
         watchedChannel = previewSession.update(
             all, trending, previewOn, PlayerHolder.currentUrl, PlayerHolder.isLive, Repo.prefs.lastChannelKey,
         ) { c ->
-            PlayerHolder.play(c.url, live = true, backups = c.backups, key = c.key)
+            PlayerHolder.play(c.url, live = true, backups = c.backups, key = c.key, recordWatched = false)
         }
     }
     DisposableEffect(Unit) {
@@ -508,6 +519,8 @@ fun GuideScreen(state: AppState) {
                         EmptyMessage("Couldn't load channels", (status as ai.ciprari.tuner.data.LoadStatus.Error).message)
                     lineup.isEmpty() && g.category == CAT_FAV ->
                         EmptyMessage("No favorites yet", "Hold OK on any channel in the guide to add it here.")
+                    lineup.isEmpty() && g.category == CAT_HOT && all.isNotEmpty() ->
+                        EmptyMessage("No Most Watched channels yet", "Watch live TV and the channels you use most will appear here.")
                     lineup.isEmpty() && all.isNotEmpty() -> EmptyMessage("No channels in this category", "Choose All Channels or try another category.")
                     lineup.isEmpty() -> EmptyMessage("No matching USA channels", "Only USA channels with provider region labels are shown. Check your playlist in Settings.")
                     else -> GuideGrid(
@@ -934,6 +947,7 @@ private fun CategoryChips(
 }
 
 /** Keep the user's main cable categories together before the remaining provider groups. */
+@Suppress("UNUSED_PARAMETER") // Retains the existing helper API; personal Most Watched is always available.
 internal fun guideCategoryItems(categories: List<Pair<String, String>>, hasTrending: Boolean): List<Pair<String, String>> {
     fun rank(name: String): Int {
         val normalized = name.uppercase(java.util.Locale.ROOT).replace(Regex("[^A-Z0-9]+"), " ").trim()
@@ -952,7 +966,7 @@ internal fun guideCategoryItems(categories: List<Pair<String, String>>, hasTrend
     return buildList {
         add(CAT_ALL to "All Channels")
         add(CAT_FAV to "Favorites")
-        if (hasTrending) add(CAT_HOT to "Most Watched")
+        add(CAT_HOT to "Most Watched")
         addAll(categories.filter { it.first !in setOf(CAT_ALL, CAT_HOT, CAT_FAV) }
             .distinctBy { it.first }.sortedBy { rank(it.second) })
     }

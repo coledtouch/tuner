@@ -307,9 +307,13 @@ class GuideRemoteTest {
         private val trending = Repo.trending.value
         private val liveStatus = Repo.liveStatus.value
         private val sp = instrumentation.targetContext.getSharedPreferences("tuner", Context.MODE_PRIVATE)
-        private val lastKey = "lastChannel_${Repo.prefs.activeId.value}"
+        private val activeId = Repo.prefs.activeId.value
+        private val lastKey = "lastChannel_$activeId"
         private val hadLast = sp.contains(lastKey)
         private val lastWatched = Repo.prefs.lastChannelKey
+        private val historyKey = "watched_$activeId"
+        private val hadHistory = sp.contains(historyKey)
+        private val watchHistory = sp.getString(historyKey, null)
         private val hadPreview = sp.contains("guidePreview")
         private val preview = Repo.prefs.guidePreview
         private val accessibilityFlags = instrumentation.uiAutomation.serviceInfo.flags
@@ -321,7 +325,10 @@ class GuideRemoteTest {
             val edit = sp.edit()
             if (!hadLast) edit.remove(lastKey)
             if (!hadPreview) edit.remove("guidePreview")
+            if (hadHistory) edit.putString(historyKey, watchHistory) else edit.remove(historyKey)
             assertTrue("Temporary guide preferences were not restored", edit.commit())
+            // Reload the restored history for the same source without changing provider settings.
+            Repo.prefs.setActive(activeId)
             val automation = instrumentation.uiAutomation
             automation.serviceInfo = automation.serviceInfo.apply { flags = accessibilityFlags }
             Repo.channels.value = channels

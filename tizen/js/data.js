@@ -212,6 +212,167 @@
     function foldMovies(items) { var groups = Object.create(null), order = []; items.forEach(function (item) { var key = text(item.name).toLowerCase().replace(/[^a-z0-9]/g, '') || item.id; if (!groups[key]) { groups[key] = []; order.push(key); } groups[key].push(item); }); return order.map(function (key) { var copies = groups[key].sort(function (a, b) { return (b.added || 0) - (a.added || 0); }), kept = copy(copies[0]), ids = [], urls = []; copies.forEach(function (item) { ids = ids.concat(item.categoryIds); urls = urls.concat([item.url], item.backups || []); }); kept.categoryIds = unique(ids); kept.categoryId = kept.categoryIds[0] || ''; kept.backups = unique(urls.filter(function (url) { return url && url !== kept.url; })); return kept; }); }
     function categoryItems(categories, hasMostWatched) { var ranked = ['SPORTS', 'PREMIUM', 'NEWS', 'MOVIES', 'ENTERTAINMENT', 'DOCUMENTARIES', 'LOCAL NEWS'], seen = Object.create(null), result = [{ id: '__all', name: 'All Channels' }, { id: '__fav', name: 'Favorites' }]; if (hasMostWatched !== false) result.push({ id: '__hot', name: 'Most Watched' }); var remaining = categories.filter(function (cat) { if (/^__(all|fav|hot)$/.test(cat.id) || seen[cat.id]) return false; seen[cat.id] = true; return true; }).map(function (cat, index) { var value = upper(cat.name).replace(/[^A-Z0-9]+/g, ' ').trim().replace(/^USA? /, ''), rank = ranked.indexOf(value); return { cat: cat, index: index, rank: rank < 0 ? 7 : rank }; }).sort(function (a, b) { return a.rank - b.rank || a.index - b.index; }); return result.concat(remaining.map(function (value) { return value.cat; })); }
 
+    // Finished catalogues stay private to this widget. IndexedDB avoids the small settings quota.
+    var catalogDatabase = null, catalogMemory = Object.create(null), catalogMemoryIdentity = '';
+    function catalogStorageApi() { try { return root.indexedDB && typeof root.indexedDB.open === 'function' ? root.indexedDB : null; } catch (_) { return null; } }
+    // SHA-256 (FIPS 180-4), synchronous so source changes cannot race catalogue selection.
+    function catalogDigest(value) {
+        var constants = [
+            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+            0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+            0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+            0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+            0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+            0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+            0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+        ];
+        var digest = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+        var bytes = [], words = [], i, j, code, next, bitLength, high, low, a, b, c, d, e, f, g, h, s0, s1, t1, t2;
+        function rotate(word, count) { return (word >>> count) | (word << (32 - count)); }
+        for (i = 0; i < value.length; i++) {
+            code = value.charCodeAt(i);
+            if (code >= 0xd800 && code <= 0xdbff) {
+                next = value.charCodeAt(i + 1);
+                if (next >= 0xdc00 && next <= 0xdfff) { code = 0x10000 + ((code - 0xd800) << 10) + next - 0xdc00; i++; }
+                else code = 0xfffd;
+            } else if (code >= 0xdc00 && code <= 0xdfff) code = 0xfffd;
+            if (code < 0x80) bytes.push(code);
+            else if (code < 0x800) bytes.push(0xc0 | (code >>> 6), 0x80 | (code & 63));
+            else if (code < 0x10000) bytes.push(0xe0 | (code >>> 12), 0x80 | ((code >>> 6) & 63), 0x80 | (code & 63));
+            else bytes.push(0xf0 | (code >>> 18), 0x80 | ((code >>> 12) & 63), 0x80 | ((code >>> 6) & 63), 0x80 | (code & 63));
+        }
+        bitLength = bytes.length * 8; high = Math.floor(bitLength / 4294967296); low = bitLength >>> 0;
+        bytes.push(128); while (bytes.length % 64 !== 56) bytes.push(0);
+        for (i = 3; i >= 0; i--) bytes.push((high >>> (i * 8)) & 255);
+        for (i = 3; i >= 0; i--) bytes.push((low >>> (i * 8)) & 255);
+        for (i = 0; i < bytes.length; i += 64) {
+            for (j = 0; j < 16; j++) words[j] = (bytes[i + j * 4] << 24) | (bytes[i + j * 4 + 1] << 16) | (bytes[i + j * 4 + 2] << 8) | bytes[i + j * 4 + 3];
+            for (j = 16; j < 64; j++) {
+                s0 = rotate(words[j - 15], 7) ^ rotate(words[j - 15], 18) ^ (words[j - 15] >>> 3);
+                s1 = rotate(words[j - 2], 17) ^ rotate(words[j - 2], 19) ^ (words[j - 2] >>> 10);
+                words[j] = (words[j - 16] + s0 + words[j - 7] + s1) | 0;
+            }
+            a = digest[0]; b = digest[1]; c = digest[2]; d = digest[3]; e = digest[4]; f = digest[5]; g = digest[6]; h = digest[7];
+            for (j = 0; j < 64; j++) {
+                s1 = rotate(e, 6) ^ rotate(e, 11) ^ rotate(e, 25);
+                t1 = (h + s1 + ((e & f) ^ (~e & g)) + constants[j] + words[j]) | 0;
+                s0 = rotate(a, 2) ^ rotate(a, 13) ^ rotate(a, 22);
+                t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+                h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+            }
+            digest[0] = (digest[0] + a) | 0; digest[1] = (digest[1] + b) | 0;
+            digest[2] = (digest[2] + c) | 0; digest[3] = (digest[3] + d) | 0;
+            digest[4] = (digest[4] + e) | 0; digest[5] = (digest[5] + f) | 0;
+            digest[6] = (digest[6] + g) | 0; digest[7] = (digest[7] + h) | 0;
+        }
+        return digest.map(function (word) { return ('00000000' + (word >>> 0).toString(16)).slice(-8); }).join('');
+    }
+    function catalogIdentity(input, options) {
+        options = options || {};
+        var source = normalizeSource(input), ordered = {};
+        Object.keys(source).sort().forEach(function (key) { if (!/^(?:__proto__|constructor|prototype)$/.test(key)) ordered[key] = source[key]; });
+        return catalogDigest(JSON.stringify({ schema: 1, source: ordered, zip: options.zip === undefined ? '01608' : text(options.zip), liveFormat: options.liveFormat || source.liveFormat || 'm3u8' }));
+    }
+    function openCatalogDatabase() {
+        var databaseApi = catalogStorageApi();
+        if (!databaseApi) return root.Promise.resolve(null);
+        if (catalogDatabase) return catalogDatabase;
+        var opening = new root.Promise(function (resolve) {
+            var done = false, timer, request;
+            function finish(database) { if (done) { if (database) database.close(); return; } done = true; if (timer && root.clearTimeout) root.clearTimeout(timer); resolve(database); }
+            try {
+                if (root.setTimeout) timer = root.setTimeout(function () { finish(null); }, 1500);
+                request = databaseApi.open('tuner.tv.catalog.v1', 1);
+                request.onupgradeneeded = function () { var store = request.result.createObjectStore('catalogs', { keyPath: 'id' }); store.createIndex('updated', 'updated'); };
+                request.onsuccess = function () { var database = request.result; database.onversionchange = function () { database.close(); if (catalogDatabase === opening) catalogDatabase = null; }; finish(database); };
+                request.onerror = function () { finish(null); };
+                request.onblocked = function () { finish(null); };
+            } catch (_) { finish(null); }
+        });
+        catalogDatabase = opening;
+        opening.then(function (database) { if (!database && catalogDatabase === opening) catalogDatabase = null; });
+        return opening;
+    }
+    function createCatalogCache(input, options) {
+        options = options || {};
+        var identity = catalogIdentity(input, options), prefix = 'catalog-' + fingerprint(identity) + ':', libraryKey = sourceKey(input), storage;
+        if (catalogMemoryIdentity !== identity) { catalogMemory = Object.create(null); catalogMemoryIdentity = identity; }
+        try { storage = root.localStorage; } catch (_) {}
+        function valid(record, kind) {
+            if (!record || record.schema !== 1 || record.identity !== identity || record.kind !== kind ||
+                typeof record.updated !== 'number' || record.updated <= 0 || record.updated > Date.now() + 300000 ||
+                !record.payload || !Array.isArray(record.payload.items) || !Array.isArray(record.payload.categories) ||
+                (kind === 'live' && (!record.payload.merged || typeof record.payload.merged !== 'object' || Array.isArray(record.payload.merged)))) return false;
+            var seen = Object.create(null), items = record.payload.items, categories = record.payload.categories, i, item;
+            for (i = 0; i < items.length; i++) { item = items[i]; if (!item || typeof item.id !== 'string' || !item.id || seen[item.id] || typeof item.name !== 'string' ||
+                item.sourceKey !== libraryKey || !Array.isArray(item.categoryIds) || (kind !== 'series' && !safeUrl(item.url)) || !Array.isArray(item.backups) ||
+                (item._episodes !== undefined && !Array.isArray(item._episodes))) return false; seen[item.id] = true; }
+            for (i = 0; i < categories.length; i++) if (!categories[i] || typeof categories[i].id !== 'string' || typeof categories[i].name !== 'string') return false;
+            return true;
+        }
+        function fallback(kind) {
+            var record = catalogMemoryIdentity === identity && catalogMemory[prefix + kind];
+            if (valid(record, kind)) return record;
+            if (kind !== 'live' || !storage) return null;
+            try { record = JSON.parse(storage.getItem('tuner.tv.catalog.live.v1')); return valid(record, kind) ? record : null; } catch (_) { return null; }
+        }
+        function saveFallback(record) {
+            if (record.kind !== 'live' || !storage) return false;
+            try { var serialized = JSON.stringify(record); if (serialized.length > 1500000) return false; storage.setItem('tuner.tv.catalog.live.v1', serialized); return true; } catch (_) { return false; }
+        }
+        function read(onRecord) {
+            if (!catalogStorageApi()) return null; // The synchronous fallback keeps unsupported TVs responsive.
+            var memory = {}, allMemory = true;
+            ['live', 'movies', 'series'].forEach(function (kind) { var record = catalogMemoryIdentity === identity && catalogMemory[prefix + kind]; if (valid(record, kind)) memory[kind] = record; else allMemory = false; });
+            if (allMemory) { ['live', 'movies', 'series'].forEach(function (kind) { if (onRecord) onRecord(kind, memory[kind]); }); return root.Promise.resolve(memory); }
+            return openCatalogDatabase().then(function (database) {
+                if (!database) { var saved = { live: fallback('live'), movies: fallback('movies'), series: fallback('series') }; Object.keys(saved).forEach(function (kind) { if (saved[kind] && onRecord) onRecord(kind, saved[kind]); }); return saved; }
+                return new root.Promise(function (resolve) {
+                    var result = {}, done = false, timer, transaction;
+                    function finish() { if (done) return; done = true; if (timer && root.clearTimeout) root.clearTimeout(timer); ['live', 'movies', 'series'].forEach(function (kind) { if (!result[kind]) { result[kind] = fallback(kind); if (result[kind] && onRecord) onRecord(kind, result[kind]); } }); resolve(result); }
+                    try {
+                        if (root.setTimeout) timer = root.setTimeout(finish, 1500);
+                        transaction = database.transaction('catalogs', 'readonly');
+                        ['live', 'movies', 'series'].forEach(function (kind) {
+                            var request = transaction.objectStore('catalogs').get(prefix + kind);
+                            request.onsuccess = function () { if (done) return; var saved = valid(request.result, kind) ? request.result : null; result[kind] = memory[kind] && (!saved || memory[kind].updated >= saved.updated) ? memory[kind] : saved; if (result[kind] && onRecord) onRecord(kind, result[kind]); };
+                        });
+                        transaction.oncomplete = finish; transaction.onerror = finish; transaction.onabort = finish;
+                    } catch (_) { finish(); }
+                });
+            });
+        }
+        function write(kind, payload) {
+            var record = { id: prefix + kind, schema: 1, identity: identity, kind: kind, updated: Date.now(), payload: payload };
+            if (catalogMemoryIdentity === identity) catalogMemory[record.id] = record;
+            if (!catalogStorageApi()) return root.Promise.resolve(saveFallback(record));
+            return openCatalogDatabase().then(function (database) {
+                if (!database) return saveFallback(record);
+                return new root.Promise(function (resolve) {
+                    var done = false, timer, transaction;
+                    function finish(saved) { if (done) return; done = true; if (timer && root.clearTimeout) root.clearTimeout(timer); resolve(saved || saveFallback(record)); }
+                    try {
+                        if (root.setTimeout) timer = root.setTimeout(function () { finish(false); }, 1500);
+                        transaction = database.transaction('catalogs', 'readwrite');
+                        var store = transaction.objectStore('catalogs'); store.put(record);
+                        var count = store.count();
+                        count.onsuccess = function () {
+                            var excess = count.result - 9;
+                            if (excess <= 0) return;
+                            var oldest = store.index('updated').openKeyCursor();
+                            oldest.onsuccess = function () { var cursor = oldest.result; if (!cursor || excess <= 0) return; if (cursor.primaryKey !== record.id) { store.delete(cursor.primaryKey); excess--; } cursor.continue(); };
+                        };
+                        transaction.oncomplete = function () { finish(true); };
+                        transaction.onerror = function () { finish(false); }; transaction.onabort = function () { finish(false); };
+                    } catch (_) { finish(false); }
+                });
+            });
+        }
+        return { identity: identity, peek: fallback, read: read, write: write,
+            fresh: function (record) { var age = Date.now() - record.updated; return age >= 0 && age < (record.kind === 'live' ? 7200000 : 43200000); } };
+    }
+
     function createStore(storage) {
         if (!storage) { try { storage = root.localStorage; } catch (_) {} }
         function read(key, fallback) { try { var parsed = JSON.parse(storage.getItem(key)); return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : fallback; } catch (_) { return fallback; } }
@@ -317,6 +478,7 @@
     function xmlResponse(value) { if (typeof value === 'string') return root.Promise.resolve(value); var bytes = new Uint8Array(value); if (bytes[0] !== 31 || bytes[1] !== 139) { try { return root.Promise.resolve(xmlBytes(bytes)); } catch (error) { return root.Promise.reject(error); } } if (!root.DecompressionStream || !root.Blob || !root.Response || !root.Blob.prototype.stream) return root.Promise.reject(new Error('This TV cannot unpack the compressed guide. Use an uncompressed XMLTV URL.')); try { return new root.Response(new root.Blob([bytes]).stream().pipeThrough(new root.DecompressionStream('gzip'))).arrayBuffer().then(function (buffer) { return xmlBytes(new Uint8Array(buffer)); }).catch(function () { throw new Error('The compressed guide could not be read. Try an uncompressed XMLTV URL.'); }); } catch (_) { return root.Promise.reject(new Error('The compressed guide could not be read. Try an uncompressed XMLTV URL.')); } }
     function createClient(input, options) {
         options = options || {}; var source = normalizeSource(input), key = sourceKey(input), generation = 0, requests = [], guideCache = Object.create(null), guidePending = Object.create(null), details = Object.create(null), cancelled = false, accountCache = null, accountUpdated = 0, accountPending = null, liveChannels = [], xmlUrl = source.epgUrl, xmlCache = null, xmlPending = null, xmlUpdated = 0;
+        var catalogCache = options.cache === false ? null : createCatalogCache(input, options), catalogWrites = [];
         function aborted() { var error = new Error('Request cancelled.'); error.name = 'AbortError'; return error; }
         function request(url, timeout, binary) { return new root.Promise(function (resolve, reject) {
             if (cancelled) { reject(aborted()); return; }
@@ -334,14 +496,71 @@
         }); }
         function json(url, timeout) { return request(url, timeout).then(function (value) { try { return JSON.parse(value); } catch (_) { throw new Error('The provider returned unreadable data. Try again.'); } }); }
         function status(kind, state, message, token) { if (token === generation && !cancelled && options.onStatus) options.onStatus(kind, { state: state, message: message || '' }); }
-        function publish(kind, items, cats, token) { if (token !== generation || cancelled) return; if (kind === 'live') { var folded = foldLive(localPolicy(usPolicy(items, cats), options.zip === undefined ? '01608' : options.zip)); aliases[key] = folded.merged; items = folded.items; cats = folded.categories; liveChannels = items; } else if (kind === 'movies') { items = foldMovies(items); cats = usedCategories(items, cats, '__tuner_movies', 'Movies'); } else cats = usedCategories(items, cats, '__tuner_series', 'Series'); items.forEach(function (item) { item.sourceKey = key; }); if (options.onCatalog) options.onCatalog(kind, items, cats); status(kind, 'ready', '', token); }
+        function deliver(kind, payload, token) {
+            if (token !== generation || cancelled) return;
+            if (kind === 'live') {
+                var merged = Object.create(null);
+                Object.keys(payload.merged || {}).forEach(function (id) { if (typeof payload.merged[id] === 'string') merged[id] = payload.merged[id]; });
+                aliases[key] = merged; liveChannels = payload.items; xmlUrl = source.epgUrl || payload.xmlUrl || '';
+            }
+            if (options.onCatalog) options.onCatalog(kind, payload.items, payload.categories);
+            status(kind, 'ready', '', token);
+        }
+        function publish(kind, items, cats, token) {
+            if (token !== generation || cancelled) return;
+            var merged = {};
+            if (kind === 'live') { var folded = foldLive(localPolicy(usPolicy(items, cats), options.zip === undefined ? '01608' : options.zip)); merged = folded.merged; items = folded.items; cats = folded.categories; }
+            else if (kind === 'movies') { items = foldMovies(items); cats = usedCategories(items, cats, '__tuner_movies', 'Movies'); }
+            else cats = usedCategories(items, cats, '__tuner_series', 'Series');
+            items.forEach(function (item) { item.sourceKey = key; });
+            var payload = { items: items, categories: cats, merged: merged, xmlUrl: xmlUrl };
+            deliver(kind, payload, token);
+            if (catalogCache && token === generation && !cancelled) catalogWrites.push(catalogCache.write(kind, payload));
+        }
         function stop() { generation++; cancelled = true; requests.slice().forEach(function (entry) { entry.cancelled = true; try { entry.xhr.abort(); } catch (_) {} }); guidePending = Object.create(null); accountPending = null; xmlPending = null; }
-        function load() {
-            stop(); cancelled = false; guideCache = Object.create(null); xmlCache = null; var token = generation, kinds = ['live', 'movies', 'series']; kinds.forEach(function (kind) { status(kind, 'loading', 'Loading ' + (kind === 'live' ? 'channels' : kind) + '…', token); });
-            if (options.onAccount && source.type === 'xtream') accountInfo(true).catch(function () {});
-            if (source.type === 'm3u') return request(source.m3uUrl).then(function (value) { if (cancelled || token !== generation) throw aborted(); var parsed = parseM3u(value, source); xmlUrl = source.epgUrl || parsed.epgUrl; publish('live', parsed.live, parsed.liveCategories, token); publish('movies', parsed.movies, parsed.movieCategories, token); publish('series', parsed.series, parsed.seriesCategories, token); }).catch(function (error) { if (error.name !== 'AbortError') kinds.forEach(function (kind) { status(kind, 'error', error.message, token); }); });
-            var endpoints = { live: ['get_live_categories', 'get_live_streams'], movies: ['get_vod_categories', 'get_vod_streams'], series: ['get_series_categories', 'get_series'] };
-            return root.Promise.all(kinds.map(function (kind) { return root.Promise.all([json(api(source, endpoints[kind][0])), json(api(source, endpoints[kind][1]))]).then(function (values) { publish(kind, parseXtream(values[1], kind, source, options.liveFormat || source.liveFormat || 'm3u8'), parseCategories(values[0]), token); }).catch(function (error) { if (error.name !== 'AbortError') status(kind, 'error', error.message, token); }); }));
+        function load(force) {
+            stop(); cancelled = false; guideCache = Object.create(null); xmlCache = null;
+            var writes = catalogWrites = [];
+            var token = generation, kinds = ['live', 'movies', 'series'];
+            var restored = Object.create(null);
+            kinds.forEach(function (kind) { status(kind, 'loading', 'Loading ' + (kind === 'live' ? 'channels' : kind) + '…', token); });
+            function restore(kind, record) {
+                if (!record || cancelled || token !== generation || restored[kind]) return;
+                restored[kind] = true;
+                deliver(kind, record.payload, token);
+            }
+            function begin(records) {
+                if (cancelled || token !== generation) return root.Promise.resolve();
+                var needed = [];
+                kinds.forEach(function (kind) {
+                    var record = records[kind];
+                    if (record) restore(kind, record);
+                    if (!record || force === true || !catalogCache.fresh(record)) {
+                        needed.push(kind);
+                        if (record) status(kind, 'loading', 'Updating ' + (kind === 'live' ? 'channels' : kind) + '…', token);
+                    }
+                });
+                if (cancelled || token !== generation) return root.Promise.resolve();
+                if (options.onAccount && source.type === 'xtream') accountInfo(true).catch(function () {});
+                function failed(kind, error) { if (error.name !== 'AbortError') status(kind, records[kind] ? 'ready' : 'error', records[kind] ? 'Your saved library is available. Refresh when the provider responds.' : error.message, token); }
+                if (!needed.length) return root.Promise.resolve();
+                if (source.type === 'm3u') return request(source.m3uUrl).then(function (value) {
+                    if (cancelled || token !== generation) throw aborted();
+                    var parsed = parseM3u(value, source); xmlUrl = source.epgUrl || parsed.epgUrl;
+                    publish('live', parsed.live, parsed.liveCategories, token); publish('movies', parsed.movies, parsed.movieCategories, token); publish('series', parsed.series, parsed.seriesCategories, token);
+                }).catch(function (error) { needed.forEach(function (kind) { failed(kind, error); }); });
+                var endpoints = { live: ['get_live_categories', 'get_live_streams'], movies: ['get_vod_categories', 'get_vod_streams'], series: ['get_series_categories', 'get_series'] };
+                return root.Promise.all(needed.map(function (kind) {
+                    return root.Promise.all([json(api(source, endpoints[kind][0])), json(api(source, endpoints[kind][1]))]).then(function (values) {
+                        if (cancelled || token !== generation) throw aborted();
+                        publish(kind, parseXtream(values[1], kind, source, options.liveFormat || source.liveFormat || 'm3u8'), parseCategories(values[0]), token);
+                    }).catch(function (error) { failed(kind, error); });
+                }));
+            }
+            var reading = catalogCache && catalogCache.read(restore), result;
+            if (reading) result = reading.then(begin);
+            else { var saved = {}; kinds.forEach(function (kind) { saved[kind] = catalogCache && catalogCache.peek(kind); }); result = begin(saved); }
+            return result.then(function () { return root.Promise.all(writes); });
         }
         function accountInfo(refresh) { if (cancelled) return root.Promise.reject(aborted()); if (source.type !== 'xtream') return root.Promise.resolve({ maxConnections: null, activeConnections: null }); if (accountPending) return accountPending; if (!refresh && accountCache && Date.now() - accountUpdated < 60000) return root.Promise.resolve(accountCache); var token = generation, pending = json(api(source), 15000).then(function (payload) { if (cancelled || token !== generation) throw aborted(); var user = payload.user_info || {}, max = Number(user.max_connections), active = Number(user.active_cons); if (String(user.auth) === '0') throw new Error('The provider rejected this login. Check your details.'); var result = { maxConnections: isFinite(max) && max > 0 ? max : null, activeConnections: user.active_cons !== undefined && isFinite(active) && active >= 0 ? active : null }; accountCache = result; accountUpdated = Date.now(); if (options.onAccount) options.onAccount(result); return result; }); accountPending = pending; pending.then(function () { if (accountPending === pending) accountPending = null; }, function () { if (accountPending === pending) accountPending = null; }); return pending; }
         function xmlGuide(channel) {
@@ -352,13 +571,13 @@
             var id = text(channel.epgId).toLowerCase(); if (!xmlCache.programs[id]) id = xmlCache.names[nameKey(channel.name)] || xmlCache.names[nameKey(id.replace(/\.[a-z]{2,3}$/i, ''))] || id;
             return root.Promise.resolve(xmlCache.programs[id] || []);
         }
-        return { sourceKey: key, load: load, cancel: stop,
+        return { sourceKey: key, catalogIdentity: catalogCache ? catalogCache.identity : catalogIdentity(input, options), load: load, cancel: stop,
             accountInfo: accountInfo,
             guide: function (channel) { if (cancelled) return root.Promise.reject(aborted()); if (source.type === 'm3u') return xmlGuide(channel); if (!channel.streamId) return root.Promise.resolve([]); var id = channel.id, cached = guideCache[id], now = Date.now(), token = generation; if (cached && now - cached.updated < 300000 && (!cached.items.length || cached.items[cached.items.length - 1].end > now)) return root.Promise.resolve(cached.items); if (guidePending[id]) return guidePending[id]; var pending = json(api(source, 'get_short_epg', { stream_id: channel.streamId, limit: 48 }), 15000).then(function (payload) { if (cancelled || token !== generation) throw aborted(); var items = parseGuide(payload); guideCache[id] = { updated: Date.now(), items: items }; if (guidePending[id] === pending) delete guidePending[id]; return items; }, function (error) { if (guidePending[id] === pending) delete guidePending[id]; throw error; }); guidePending[id] = pending; return pending; },
             seriesInfo: function (series) { if (cancelled) return root.Promise.reject(aborted()); if (series._episodes) return root.Promise.resolve({ seasons: groupEpisodes(series._episodes) }); if (source.type !== 'xtream') return root.Promise.resolve({ seasons: [] }); var cacheKey = 's:' + series.id, token = generation; if (details[cacheKey]) return root.Promise.resolve(details[cacheKey]); return json(api(source, 'get_series_info', { series_id: series.streamId || series.id.replace(/^s:/, '') }), 25000).then(function (payload) { if (cancelled || token !== generation) throw aborted(); var result = parseSeriesInfo(payload, source); details[cacheKey] = result; return result; }); },
             movieInfo: function (movie) { if (cancelled) return root.Promise.reject(aborted()); if (source.type !== 'xtream') return root.Promise.resolve(copy(movie)); var cacheKey = 'm:' + movie.id, token = generation; if (details[cacheKey]) return root.Promise.resolve(details[cacheKey]); return json(api(source, 'get_vod_info', { vod_id: movie.streamId || movie.id.replace(/^m:/, '') }), 25000).then(function (payload) { if (cancelled || token !== generation) throw aborted(); var info = payload.info || {}, result = { plot: text(info.plot || info.description), cast: text(info.cast || info.actors), director: text(info.director), genre: text(info.genre), year: text(info.releasedate || info.release_date || info.year).substring(0, 4), duration: text(info.duration), rating: text(info.rating), image: safeUrl(info.movie_image || info.cover_big), backdrop: safeUrl(first(info.backdrop_path)) }; details[cacheKey] = result; return result; }); } };
     }
-    root.TunerData = { createStore: createStore, createClient: createClient, sourceKey: sourceKey, normalizeSource: normalizeSource, categoryItems: categoryItems,
+    root.TunerData = { createStore: createStore, createClient: createClient, sourceKey: sourceKey, catalogIdentity: catalogIdentity, normalizeSource: normalizeSource, categoryItems: categoryItems,
         parseXtream: parseXtream, parseCategories: parseCategories, parseM3u: parseM3u, usPolicy: usPolicy, localPolicy: localPolicy, foldLive: foldLive, foldMovies: foldMovies,
         parseGuide: parseGuide, parseSeriesInfo: parseSeriesInfo, parseXmltv: parseXmltv, parseXmltvAsync: parseXmltvAsync, xmlTime: xmlTime, marketForZip: marketForZip, displayName: displayName, idleEvent: idleEvent, offAir: offAir };
 }(typeof window !== 'undefined' ? window : this));

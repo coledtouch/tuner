@@ -67,7 +67,7 @@ object PlayerHolder {
     val pipVideoOnly = MutableStateFlow(false)
     val pipEligible: Boolean get() {
         val p = exo ?: return false
-        return fullscreenPlayback.value && currentUrl != null && error.value == null &&
+        return !TwoChannelPlayer.active.value && fullscreenPlayback.value && currentUrl != null && error.value == null &&
             p.videoSize.width > 0 && p.videoSize.height > 0 && p.playbackState in setOf(Player.STATE_READY, Player.STATE_BUFFERING)
     }
 
@@ -82,6 +82,7 @@ object PlayerHolder {
     private var sources: List<String> = emptyList()
     private var sourceIndex = 0
     private var channelKey: String? = null
+    private val watchIntent = LiveWatchIntent()
     /** The source that last played for each channel, so a working backup goes first next time. */
     private val goodSource = HashMap<String, String>()
     private val source: String? get() = sources.getOrNull(sourceIndex)
@@ -189,6 +190,7 @@ object PlayerHolder {
             when (state) {
                 Player.STATE_READY -> {
                     error.value = null; reconnects = 0; PlaybackLog.ready()
+                    watchIntent.ready()?.let { Repo.prefs.recordWatched(it) }
                     channelKey?.let { key -> source?.let { goodSource[key] = it } }
                 }
                 Player.STATE_BUFFERING -> if (p.isPlaying || p.playWhenReady) PlaybackLog.note("buffering, buffered=${p.totalBufferedDuration}ms")
@@ -286,12 +288,17 @@ object PlayerHolder {
      * Plays [url]. For a live channel, [backups] are its other copies (tried in order when a copy is down)
      * and [key] identifies the channel, so a copy that worked goes first next time and a channel that fails
      * everywhere can be hidden.
+     * Automatic guide restoration sets [recordWatched] false; opening the player or changing a
+     * channel explicitly can promote that preview into one watch without reconnecting it.
      */
     @Suppress("UNUSED_PARAMETER") // Kept for callers from older request models; audio is never restricted.
-    fun play(url: String, live: Boolean, startMs: Long = 0, backups: List<String> = emptyList(), key: String? = null, requireEnglishAudio: Boolean = false) {
+    fun play(url: String, live: Boolean, startMs: Long = 0, backups: List<String> = emptyList(), key: String? = null, requireEnglishAudio: Boolean = false, recordWatched: Boolean = true) {
+        TwoChannelPlayer.stop()
         playbackIntent.requestStart()
         val p = player
         if (url == currentUrl && isLive == live && p.playbackState != Player.STATE_IDLE && error.value == null) {
+            watchIntent.request(key, live, recordWatched, sameRequest = true)
+            if (p.playbackState == Player.STATE_READY) watchIntent.ready()?.let { Repo.prefs.recordWatched(it) }
             if (appForeground && !p.playWhenReady) p.play()
             return
         }
@@ -307,6 +314,7 @@ object PlayerHolder {
         currentUrl = url
         isLive = live
         channelKey = key
+        watchIntent.request(key, live, recordWatched)
         val all = (listOf(url) + backups).distinct()
         val preferred = key?.let { goodSource[it] }?.takeIf { it in all }
         sources = if (preferred != null) listOf(preferred) + (all - preferred) else all
@@ -328,6 +336,7 @@ object PlayerHolder {
         main.removeCallbacksAndMessages(null)
         p.stop()
         currentUrl = null
+        watchIntent.stop()
         error.value = null
     }
 
@@ -356,6 +365,7 @@ object PlayerHolder {
         exo?.stop()
         exo?.clearMediaItems()
         currentUrl = null
+        watchIntent.stop()
         sources = emptyList()
         error.value = null
     }

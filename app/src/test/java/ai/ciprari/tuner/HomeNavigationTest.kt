@@ -1,6 +1,7 @@
 package ai.ciprari.tuner
 
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.input.InputMode
 import androidx.compose.ui.input.InputModeManager
 import androidx.compose.ui.input.key.Key
@@ -63,7 +64,17 @@ class HomeNavigationTest {
                 override fun requestInputMode(inputMode: InputMode) = true
             }) { TunerTheme { HomeScreen(state) } }
         }
-        rule.waitForIdle()
+        awaitLibrary(state)
+    }
+
+    private fun awaitLibrary(state: AppState) {
+        val prefix = if (state.tab == Tab.MOVIES) "movies:" else "series:"
+        rule.waitUntil(timeoutMillis = 5_000) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            rule.runOnIdle { Snapshot.sendApplyNotifications() }
+            rule.mainClock.advanceTimeByFrame()
+            state.lastFocusedKey?.startsWith(prefix) == true && !state.restoreFocus
+        }
     }
 
     @Test fun backAndMenuReachActiveNavigationWithoutLosingTheMovieSelection() {
@@ -115,7 +126,7 @@ class HomeNavigationTest {
         rule.onNodeWithContentDescription(Tab.SERIES.title).assertIsFocused()
         rule.runOnIdle { assertEquals(Tab.MOVIES, state.tab); assertEquals(Screen.Home, state.top) }
         rule.onRoot().performKeyInput { pressKey(Key.Enter) }
-        rule.waitForIdle()
+        awaitLibrary(state)
         rule.runOnIdle { assertEquals(Tab.SERIES, state.tab); assertEquals(Screen.Home, state.top) }
         rule.onNode(hasClickAction() and hasText("Navigation Series")).assertIsFocused()
     }

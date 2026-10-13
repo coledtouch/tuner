@@ -122,15 +122,17 @@ fun JsonReader.readAny(): Any? = when (peek()) {
  * Streams a JSON file whose top level is either an array of objects or an object of objects
  * (some panels return the latter) and hands each object to [fn] without holding the whole list.
  */
-fun forEachJsonObject(file: File, fn: (JMap) -> Unit) {
+fun forEachJsonObject(file: File, fn: (JMap) -> Unit) = forEachJsonObject(file, null, fn)
+
+/** Catalogues need a small subset of fields; skip provider extras without allocating their trees. */
+fun forEachJsonObject(file: File, fields: Set<String>?, fn: (JMap) -> Unit) {
     JsonReader(InputStreamReader(Net.openMaybeGzip(file), Charsets.UTF_8)).use { r ->
         r.isLenient = true
         when (r.peek()) {
             JsonToken.BEGIN_ARRAY -> {
                 r.beginArray()
                 while (r.hasNext()) {
-                    @Suppress("UNCHECKED_CAST")
-                    if (r.peek() == JsonToken.BEGIN_OBJECT) fn(r.readAny() as JMap) else r.skipValue()
+                    if (r.peek() == JsonToken.BEGIN_OBJECT) fn(r.readFields(fields)) else r.skipValue()
                 }
                 r.endArray()
             }
@@ -138,14 +140,28 @@ fun forEachJsonObject(file: File, fn: (JMap) -> Unit) {
                 r.beginObject()
                 while (r.hasNext()) {
                     r.nextName()
-                    @Suppress("UNCHECKED_CAST")
-                    if (r.peek() == JsonToken.BEGIN_OBJECT) fn(r.readAny() as JMap) else r.skipValue()
+                    if (r.peek() == JsonToken.BEGIN_OBJECT) fn(r.readFields(fields)) else r.skipValue()
                 }
                 r.endObject()
             }
             else -> Unit
         }
     }
+}
+
+private fun JsonReader.readFields(fields: Set<String>?): JMap {
+    if (fields == null) {
+        @Suppress("UNCHECKED_CAST")
+        return readAny() as JMap
+    }
+    val result = LinkedHashMap<String, Any?>()
+    beginObject()
+    while (hasNext()) {
+        val key = nextName()
+        if (key in fields) result[key] = readAny() else skipValue()
+    }
+    endObject()
+    return result
 }
 
 fun parseJson(text: String): Any? = JsonReader(text.reader()).use { it.isLenient = true; it.readAny() }

@@ -209,6 +209,7 @@ private fun LivePlayer(req: PlayRequest.Live, onExit: (Channel?) -> Unit) {
     // True while the viewer is flipping quickly (held key or rapid taps).
     var flipping by remember { mutableStateOf(false) }
     var lastZapAt by remember { mutableLongStateOf(0L) }
+    var explicitTune by remember { mutableStateOf(true) }
     // Direction of the last up/down press, so a dead channel is skipped the way the viewer was going.
     var step by remember { mutableIntStateOf(1) }
     var skips by remember { mutableIntStateOf(0) }
@@ -242,7 +243,7 @@ private fun LivePlayer(req: PlayRequest.Live, onExit: (Channel?) -> Unit) {
         favoriteNoticeTick++
         showBanner()
     }
-    fun zap(to: Int, direction: Int = 0) {
+    fun zap(to: Int, direction: Int = 0, recordWatched: Boolean = true) {
         val n = lineup.size
         if (direction != 0) step = direction
         var target = ((to % n) + n) % n
@@ -253,6 +254,7 @@ private fun LivePlayer(req: PlayRequest.Live, onExit: (Channel?) -> Unit) {
             val t = android.os.SystemClock.uptimeMillis()
             flipping = t - lastZapAt < 450
             lastZapAt = t
+            explicitTune = recordWatched
             previous = index; index = target
             // Hang up on the old channel now. Single-connection plans only accept the next stream
             // once the provider has let go of this one, so the sooner it closes the faster the zap.
@@ -265,9 +267,10 @@ private fun LivePlayer(req: PlayRequest.Live, onExit: (Channel?) -> Unit) {
     // Tune. A single press tunes almost at once; while flipping quickly only the banner moves, and the
     // stream opens when the viewer lands on a channel.
     LaunchedEffect(channel.key) {
+        val recordWatched = explicitTune
         if (!firstTune) delay(if (flipping) 450 else 90)
         firstTune = false
-        PlayerHolder.play(channel.url, live = true, backups = channel.backups, key = channel.key)
+        PlayerHolder.play(channel.url, live = true, backups = channel.backups, key = channel.key, recordWatched = recordWatched)
         Repo.prefs.lastChannelKey = channel.key
     }
     // The channel failed on every copy: say so briefly, then move on in the direction the viewer was flipping.
@@ -276,7 +279,7 @@ private fun LivePlayer(req: PlayRequest.Live, onExit: (Channel?) -> Unit) {
         Toasts.show("${channel.name} isn't working right now. Skipping it.")
         delay(1500)
         skips++
-        zap(index + step)
+        zap(index + step, recordWatched = false)
     }
     LaunchedEffect(ui.playing) { if (ui.playing) skips = 0 }
     LaunchedEffect(favoriteNoticeTick) { if (favoriteNotice != null) { delay(2200); favoriteNotice = null } }

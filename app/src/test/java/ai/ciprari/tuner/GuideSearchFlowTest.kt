@@ -42,6 +42,7 @@ import ai.ciprari.tuner.data.SourceType
 import ai.ciprari.tuner.player.PlayerHolder
 import ai.ciprari.tuner.ui.AppState
 import ai.ciprari.tuner.ui.CAT_FAV
+import ai.ciprari.tuner.ui.CAT_HOT
 import ai.ciprari.tuner.ui.HomeScreen
 import ai.ciprari.tuner.ui.Palette
 import ai.ciprari.tuner.ui.Screen
@@ -142,6 +143,15 @@ class GuideSearchFlowTest {
         }
     }
 
+    private fun awaitMovieDetail(state: AppState, id: String) {
+        rule.waitUntil(timeoutMillis = 5_000) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            rule.runOnIdle { Snapshot.sendApplyNotifications() }
+            rule.mainClock.advanceTimeByFrame()
+            (state.top as? Screen.MovieDetail)?.movie?.id == id
+        }
+    }
+
     @Test fun searchReturnRestoresTheSelectedResultAndQuery() {
         val state = AppState().apply { tab = Tab.SEARCH; searchQuery = "Movie" }
         rule.setContent { Fixture(state) }
@@ -150,12 +160,37 @@ class GuideSearchFlowTest {
         rule.onNodeWithTag(movieTag(1)).performSemanticsAction(SemanticsActions.RequestFocus) { it() }
         rule.onNodeWithTag(movieTag(1)).assertIsFocused()
         rule.onRoot().performKeyInput { pressKey(Key.Enter) }
-        settle(300)
+        awaitMovieDetail(state, "flow-m:1")
         rule.runOnIdle { assertEquals("flow-m:1", (state.top as Screen.MovieDetail).movie.id); state.pop() }
         settle()
         awaitSearchResult(movieTag(1), focused = true)
         rule.onNodeWithTag(movieTag(1)).assertIsFocused()
         rule.runOnIdle { assertEquals("Movie", state.searchQuery); assertFalse(state.restoreFocus) }
+    }
+
+    @Test fun newerSearchResultFocusCancelsPendingFieldRestoreDuringOkPress() {
+        val state = AppState().apply { tab = Tab.SEARCH; searchQuery = "Movie"; restoreFocus = false }
+        rule.setContent { Fixture(state) }
+        settle()
+        awaitSearchResult(movieTag(1))
+        // Start a field restoration, but keep its attachment frame pending. A new remote
+        // selection must take precedence even if its OK press spans that next frame.
+        rule.runOnIdle { state.searchFocusedKey = null; state.restoreFocus = true }
+        rule.mainClock.advanceTimeByFrame()
+        rule.waitForIdle()
+        rule.runOnIdle { assertTrue("The delayed field restoration must still be pending", state.restoreFocus) }
+        rule.onNodeWithTag(movieTag(1)).performSemanticsAction(SemanticsActions.RequestFocus) { it() }
+        rule.onNodeWithTag(movieTag(1)).assertIsFocused()
+        rule.onRoot().performKeyInput { keyDown(Key.Enter) }
+        rule.mainClock.advanceTimeByFrame()
+        rule.waitForIdle()
+        rule.onNodeWithTag(movieTag(1)).assertIsFocused()
+        rule.onRoot().performKeyInput { keyUp(Key.Enter) }
+        awaitMovieDetail(state, "flow-m:1")
+        rule.runOnIdle {
+            assertEquals("flow-m:1", (state.top as Screen.MovieDetail).movie.id)
+            assertEquals(movieTag(1).removePrefix("search-hit:"), state.searchFocusedKey)
+        }
     }
 
     @Test fun searchFavoriteIsASeparateFocusTargetAndDoesNotStartPlayback() {
@@ -283,6 +318,47 @@ class GuideSearchFlowTest {
         rule.runOnIdle { state.guide.pendingChannelKey = channels[7].key }
         settle(500)
         rule.runOnIdle { assertEquals(7, state.guide.row); assertEquals(channels[7].key, state.guide.selectedChannelKey); assertEquals(null, state.guide.pendingChannelKey) }
+    }
+
+    @Test fun personallyWatchedPendingChannelRestoresWithoutAProviderTrendingFeed() {
+        Repo.prefs.recordWatched(channels[7].key, 10)
+        val state = AppState().apply { guide.initialized = true; guide.category = CAT_HOT; guide.pendingChannelKey = channels[7].key }
+        rule.setContent { Fixture(state) }
+        settle()
+        rule.runOnIdle {
+            assertTrue(Repo.trending.value.isEmpty())
+            assertEquals(CAT_HOT, state.guide.category)
+            assertEquals(channels[7].key, state.guide.selectedChannelKey)
+            assertEquals(null, state.guide.pendingChannelKey)
+            Repo.prefs.recordWatched(channels[3].key, 20)
+            Repo.prefs.recordWatched(channels[3].key, 30)
+            state.guide.pendingChannelKey = channels[7].key
+        }
+        settle()
+        rule.runOnIdle {
+            assertEquals(CAT_HOT, state.guide.category)
+            assertEquals(channels[7].key, state.guide.selectedChannelKey)
+            assertEquals(1, state.guide.row)
+            assertEquals(null, state.guide.pendingChannelKey)
+        }
+        rule.onNodeWithTag("guide-grid").assertIsFocused()
+    }
+
+    @Test fun pendingProviderPickDoesNotRedirectToAPersonalListThatCannotDisplayIt() {
+        Repo.prefs.recordWatched(channels[7].key, 10)
+        val providerOnly = channels[0].copy(key = "provider-only", name = "Provider event")
+        Repo.trending.value = listOf(providerOnly)
+        val state = AppState().apply { guide.initialized = true; guide.category = "news" }
+        rule.setContent { Fixture(state) }
+        settle()
+        rule.runOnIdle { state.guide.pendingChannelKey = providerOnly.key }
+        settle()
+        rule.runOnIdle {
+            assertEquals("news", state.guide.category)
+            assertEquals(channels[0].key, state.guide.selectedChannelKey)
+            assertEquals(null, state.guide.pendingChannelKey)
+        }
+        rule.onNodeWithTag("guide-grid").assertIsFocused()
     }
 
     @Test fun browsingGuideKeepsTheWatchedStreamAndPreviewOpensThatChannel() {

@@ -14,6 +14,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -36,6 +38,7 @@ import androidx.compose.material.icons.rounded.Tv
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Cloud
+import androidx.compose.material.icons.rounded.ViewWeek
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -89,6 +92,7 @@ fun HomeScreen(state: AppState) {
                     Tab.MOVIES -> MoviesScreen(state)
                     Tab.SERIES -> SeriesScreen(state)
                     Tab.STREAMING -> TorrentioScreen(state)
+                    Tab.MULTIVIEW -> MultiViewScreen(state)
                     Tab.SEARCH -> SearchScreen(state)
                     Tab.SETTINGS -> SettingsScreen(state)
                 }
@@ -124,8 +128,9 @@ private fun TopBar(state: AppState) {
 
     BoxWithConstraints(Modifier.fillMaxWidth()) {
     val containerWidth = maxWidth
-    val wide = maxWidth >= 850.dp
-    val showClock = maxWidth >= 720.dp
+    val wide = maxWidth >= 1000.dp
+    val showClock = maxWidth >= 1000.dp
+    val showBrandName = maxWidth >= 850.dp
     val inset = if (maxWidth < 720.dp) 20.dp else 28.dp
     Row(
         Modifier.fillMaxWidth().height(if (wide) 64.dp else 58.dp).padding(horizontal = inset),
@@ -135,12 +140,12 @@ private fun TopBar(state: AppState) {
             Modifier.size(28.dp).clip(RoundedCornerShape(8.dp)).background(Palette.accent),
             contentAlignment = Alignment.Center,
         ) { Icon(Icons.Rounded.PlayArrow, null, tint = Palette.onAccent, modifier = Modifier.size(22.dp)) }
-        if (showClock) Column(Modifier.padding(start = 9.dp)) {
+        if (showBrandName) Column(Modifier.padding(start = 9.dp)) {
             Text("tuner", color = Palette.text, fontSize = 21.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.5).sp)
             Text(if (state.navigationFocused) "OK  Open" else "Back  Tabs", color = Palette.dim, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.3.sp)
         }
         Spacer(Modifier.width(if (wide) 28.dp else 16.dp))
-        Row(Modifier.onFocusChanged { state.navigationFocused = it.hasFocus }.focusGroup(), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()).onFocusChanged { state.navigationFocused = it.hasFocus }.focusGroup(), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
             Tab.entries.forEach { t ->
                 val selected = state.tab == t
                 FocusBox(
@@ -168,22 +173,20 @@ private fun TopBar(state: AppState) {
                         Tab.MOVIES -> Icons.Rounded.Movie
                         Tab.SERIES -> Icons.Rounded.Tv
                         Tab.STREAMING -> Icons.Rounded.Cloud
+                        Tab.MULTIVIEW -> Icons.Rounded.ViewWeek
                         Tab.SEARCH -> Icons.Rounded.Search
                         Tab.SETTINGS -> Icons.Rounded.Settings
                     }, null, tint = c, modifier = Modifier.size(18.dp))
-                    if (wide || t in listOf(Tab.GUIDE, Tab.MOVIES, Tab.SERIES, Tab.STREAMING)) {
                     Text(
                         t.title,
                         color = c,
-                        fontSize = 15.sp, fontWeight = if (selected || f) FontWeight.SemiBold else FontWeight.Medium,
+                        fontSize = if (wide) 15.sp else 14.sp, fontWeight = if (selected || f) FontWeight.SemiBold else FontWeight.Medium,
                         maxLines = 1,
                     )
-                    }
                     }
                 }
             }
         }
-        Spacer(Modifier.weight(1f))
         if (busy != null) {
             CircularProgressIndicator(color = Palette.dim, strokeWidth = 2.dp, modifier = Modifier.size(14.dp))
             if (containerWidth >= 1120.dp) Text("Updating library", color = Palette.dim, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 8.dp, end = 16.dp))

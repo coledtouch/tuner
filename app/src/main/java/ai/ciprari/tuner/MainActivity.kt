@@ -21,6 +21,7 @@ import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import ai.ciprari.tuner.player.PlayerHolder
+import ai.ciprari.tuner.player.TwoChannelPlayer
 import ai.ciprari.tuner.player.PipAspectRatio
 import ai.ciprari.tuner.ui.App
 import ai.ciprari.tuner.ui.TunerTheme
@@ -127,12 +128,14 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         started = true
         if (Build.VERSION.SDK_INT < 26 || !isInPictureInPictureMode) PlayerHolder.setPipTransition(false)
+        TwoChannelPlayer.onAppForeground()
         PlayerHolder.onAppForeground()
     }
 
     override fun onStop() {
         started = false
         if (!PlayerHolder.inPictureInPicture.value) PlayerHolder.setPipTransition(false)
+        TwoChannelPlayer.onAppBackground()
         PlayerHolder.onAppBackground()
         super.onStop()
     }
@@ -142,6 +145,7 @@ class MainActivity : ComponentActivity() {
             runCatching { unregisterReceiver(pipReceiver) }
         }
         if (isFinishing) {
+            TwoChannelPlayer.stop()
             PlayerHolder.setPictureInPictureMode(false)
             PlayerHolder.setFullscreenPlayback(false)
             PlayerHolder.stop()

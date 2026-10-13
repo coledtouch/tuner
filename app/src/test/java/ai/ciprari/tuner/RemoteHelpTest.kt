@@ -14,7 +14,8 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
-import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.hasScrollAction
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.pressKey
 import ai.ciprari.tuner.data.Repo
 import ai.ciprari.tuner.ui.AppState
@@ -46,7 +47,8 @@ class RemoteHelpTest {
                 override fun requestInputMode(inputMode: InputMode) = true
             }) { TunerTheme { SettingsScreen(state) } }
         }
-        rule.onNodeWithText("onn 4K remote").performScrollTo().performClick()
+        rule.onNode(hasScrollAction()).performScrollToNode(hasText("onn 4K remote"))
+        rule.onNodeWithText("onn 4K remote").performClick()
         // Robolectric creates the dialog view but does not deliver the OS window-focus event.
         rule.runOnIdle {
             val dialog = checkNotNull(ShadowDialog.getLatestDialog())

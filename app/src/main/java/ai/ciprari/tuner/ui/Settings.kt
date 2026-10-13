@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -28,6 +29,7 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -78,6 +80,8 @@ fun SettingsScreen(state: AppState) {
     var sheetFor by remember { mutableStateOf<Source?>(null) }
     var confirmDelete by remember { mutableStateOf<Source?>(null) }
     var themeSheet by remember { mutableStateOf(false) }
+    var restoreTheme by remember { mutableStateOf(false) }
+    val themeFocus = remember { FocusRequester() }
     var regionSheet by remember { mutableStateOf(false) }
     var remoteHelp by remember { mutableStateOf(false) }
     var restoreRemoteHelp by remember { mutableStateOf(false) }
@@ -97,6 +101,9 @@ fun SettingsScreen(state: AppState) {
     }
     LaunchedEffect(restoreLocalMarket, windowFocused) {
         if (restoreLocalMarket && windowFocused && requestAttachedFocus(localMarketFocus)) restoreLocalMarket = false
+    }
+    LaunchedEffect(restoreTheme, windowFocused) {
+        if (restoreTheme && windowFocused && requestAttachedFocus(themeFocus)) restoreTheme = false
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -144,7 +151,8 @@ fun SettingsScreen(state: AppState) {
                 }
             }
             item {
-                SettingRow("Theme", "Colors for the guide, menus and highlights", trailing = Palette.theme.name, onClick = { themeSheet = true })
+                SettingRow("Theme", "True Black and more colors for your guide and library", trailing = Palette.theme.name,
+                    modifier = Modifier.focusRequester(themeFocus), onClick = { themeSheet = true })
             }
 
             header("Playback")
@@ -165,7 +173,7 @@ fun SettingsScreen(state: AppState) {
             item(key = "prev$rev") {
                 val on = Repo.prefs.guidePreview
                 SettingRow(
-                    "Guide preview", "Play the highlighted channel in the guide's preview window",
+                    "Guide preview", "Keep the channel you are watching visible while browsing the guide",
                     trailing = if (on) "On" else "Off",
                     onClick = {
                         Repo.prefs.guidePreview = !on; rev++
@@ -242,7 +250,7 @@ fun SettingsScreen(state: AppState) {
             ),
             onClose = { localMarketSheet = false; restoreLocalMarket = true },
         )
-        if (themeSheet) ThemeSheet(onClose = { themeSheet = false; rev++; state.restoreFocus = true })
+        if (themeSheet) ThemeSheet(onClose = { themeSheet = false; restoreTheme = true })
         if (regionSheet) RegionSheet(onClose = { changed ->
             regionSheet = false; rev++; state.restoreFocus = true
             if (changed) { Repo.reloadFreeGuides(); Toasts.show("Looking for guide data in the new regions") }
@@ -292,6 +300,7 @@ private fun OnnRemoteHelp(onClose: () -> Unit) {
             "OK / Enter" to "Open the selected item. While a movie or episode plays, pause or resume.",
             "Back" to "Close details or player controls. From a library, return to the top tabs.",
             "Channel + / −" to "Change channels while watching live TV.",
+            "Multi View" to "Choose two channels and Watch both. OK on a video selects its audio; Channel + / − changes the focused channel.",
             "Hold OK" to "While watching live TV, add or remove the channel from Favorites.",
             "Down" to "While watching a movie or episode, open Audio and Subtitles.",
             "Star shortcut" to "In Google TV remote settings, set the star button to launch Tuner.",
@@ -420,25 +429,43 @@ fun ActionSheet(title: String, actions: List<Pair<String, () -> Unit>>, onClose:
 }
 
 @Composable
-private fun ThemeSheet(onClose: () -> Unit) {
+internal fun ThemeSheet(onClose: () -> Unit) {
+    val initial = remember { Palette.theme }
+    val initialIndex = remember { Themes.all.indexOfFirst { it.id == initial.id }.coerceAtLeast(0) }
+    val list = rememberLazyListState(initialFirstVisibleItemIndex = initialIndex)
     val first = remember { FocusRequester() }
-    BackHandler { onClose() }
-    LaunchedEffect(Unit) { delay(40); runCatching { first.requestFocus() } }
-    Box(Modifier.fillMaxSize().dimBackground(0.6f), contentAlignment = Alignment.CenterEnd) {
+    val windowFocused = LocalWindowInfo.current.isWindowFocused
+    var focusedIndex by remember { mutableIntStateOf(initialIndex) }
+    var committed by remember { mutableStateOf(false) }
+    DisposableEffect(Unit) { onDispose { if (!committed) Palette.theme = initial } }
+    BackHandler { Palette.theme = initial; onClose() }
+    LaunchedEffect(windowFocused) { if (windowFocused) requestAttachedFocus(first) }
+    BoxWithConstraints(Modifier.fillMaxSize().dimBackground(0.6f), contentAlignment = Alignment.CenterEnd) {
+        val compact = maxHeight < 420.dp
         Column(
-            Modifier.width(400.dp).fillMaxHeight().background(Palette.surface).padding(24.dp),
+            Modifier.width(400.dp).fillMaxHeight().background(Palette.surface).padding(if (compact) 16.dp else 24.dp)
+                .onPreviewKeyEvent {
+                    if (it.type != KeyEventType.KeyDown) false else when (it.nativeKeyEvent.keyCode) {
+                        android.view.KeyEvent.KEYCODE_DPAD_LEFT, android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> true
+                        android.view.KeyEvent.KEYCODE_DPAD_UP -> focusedIndex == 0
+                        android.view.KeyEvent.KEYCODE_DPAD_DOWN -> focusedIndex == Themes.all.lastIndex
+                        else -> false
+                    }
+                },
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("Theme", color = Palette.text, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
-            Text("Changes apply as you move through the list.", color = Palette.dim, fontSize = 13.sp, modifier = Modifier.padding(bottom = 6.dp))
-            Themes.all.forEach { t ->
-                val current = Palette.theme.id == t.id
+            Text("Theme", color = Palette.text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Text("Preview a color, then press OK to keep it.", color = Palette.dim, fontSize = 13.sp)
+            LazyColumn(state = list, modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+              items(Themes.all, key = { it.id }) { t ->
+                val current = initial.id == t.id
                 FocusBox(
-                    onClick = { onClose() },
-                    modifier = Modifier.fillMaxWidth().height(56.dp).then(if (current) Modifier.focusRequester(first) else Modifier),
+                    onClick = { committed = true; Palette.theme = t; Repo.prefs.themeId = t.id; onClose() },
+                    modifier = Modifier.fillMaxWidth().height(if (compact) 52.dp else 56.dp).then(if (current) Modifier.focusRequester(first) else Modifier),
                     shape = RoundedCornerShape(10.dp), color = Palette.surface2, focusedColor = Palette.focus,
                     ring = false, focusedScale = 1.02f,
-                    onFocus = { if (it) { Palette.theme = t; Repo.prefs.themeId = t.id } },
+                    onFocus = { if (it) { focusedIndex = Themes.all.indexOf(t); Palette.theme = t } },
                 ) { f ->
                     Row(Modifier.fillMaxSize().padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                         Row(Modifier.clip(RoundedCornerShape(6.dp))) {
@@ -451,7 +478,9 @@ private fun ThemeSheet(onClose: () -> Unit) {
                         if (current) Icon(Icons.Rounded.CheckCircle, null, tint = if (f) Palette.onFocus else Palette.accent, modifier = Modifier.size(18.dp))
                     }
                 }
+              }
             }
+            Text("↑ ↓ Preview · OK Save · Back Cancel", color = Palette.dim, fontSize = 12.sp)
         }
     }
 }

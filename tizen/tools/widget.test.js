@@ -27,7 +27,7 @@ test("private exports, certificates and tool scripts can never enter the widget"
 
 test("wrong widget namespaces, privileges and remote-script CSP are rejected", () => {
     const xml = manifest.toString("utf8");
-    assert.equal(widget.validateManifest(xml), "1.4.0");
+    assert.equal(widget.validateManifest(xml), require("../package.json").version);
     assert.throws(() => widget.validateManifest(xml.replace('xmlns:tizen="http://tizen.org/ns/widgets"', 'xmlns:tizen="https://example.test"')), /namespace/);
     assert.throws(() => widget.validateManifest(xml.replace('tv.inputdevice', 'filesystem.read')), /privileges/);
     assert.throws(() => widget.validateManifest(xml.replace("script-src 'self' file:", "script-src 'self' https:")), /packaged scripts/);
@@ -43,7 +43,7 @@ test("source validation rejects newer JavaScript, eval and inline remote script 
             fs.mkdirSync(path.dirname(target), { recursive: true });
             fs.writeFileSync(target, name === "config.xml" ? manifest : name === "index.html" ? html : name.endsWith(".js") ? "var value = 1;" : "fixture");
         });
-        assert.equal(widget.validateSource(fixture), "1.4.0");
+        assert.equal(widget.validateSource(fixture), require("../package.json").version);
         fs.writeFileSync(path.join(fixture, "js/app.js"), "const value = 1;");
         assert.throws(() => widget.validateSource(fixture), /keyword|reserved|Unexpected/);
         fs.writeFileSync(path.join(fixture, "js/app.js"), "eval('alert(1)');");

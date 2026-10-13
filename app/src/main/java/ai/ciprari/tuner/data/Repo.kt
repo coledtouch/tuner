@@ -2,11 +2,11 @@ package ai.ciprari.tuner.data
 
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -14,6 +14,8 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ensureActive
+import kotlin.coroutines.coroutineContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Collections
@@ -33,9 +35,17 @@ object Repo {
     lateinit var prefs: Prefs
         private set
     private lateinit var cacheRoot: File
+    private lateinit var snapshots: CatalogSnapshots
+    private lateinit var snapshotRoot: File
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var job: Job? = null
     @Volatile private var generation = 0L
+    @Volatile private var catalogueIdentity: CatalogSnapshots.Identity? = null
+    private val startupPhases = ConcurrentHashMap<String, String>()
+    /** Native benchmark output contains no account identifiers, names, URLs or credentials. */
+    fun snapshotDiagnostics(): String = (snapshots.readDiagnostics + startupPhases).toSortedMap().entries.joinToString { "${it.key}=${it.value}" }
+    private data class LoadRequest(val source: Source, val identity: CatalogSnapshots.Identity,
+        val format: String, val zip: String, val generation: Long, val force: Boolean)
 
     val liveCategories = MutableStateFlow<List<Category>>(emptyList())
     val channels = MutableStateFlow<List<Channel>>(emptyList())
@@ -71,6 +81,8 @@ object Repo {
         prefs = Prefs(context)
         StreamingCatalog.init(context)
         cacheRoot = File(context.cacheDir, "sources")
+        snapshotRoot = File(context.filesDir, "catalogues")
+        snapshots = CatalogSnapshots(snapshotRoot)
         if (prefs.activeId.value == null) prefs.sources.value.firstOrNull()?.let { prefs.setActive(it.id) }
     }
 
@@ -81,28 +93,44 @@ object Repo {
 
     // ------------------------------------------------------------------ loading
 
-    fun load(force: Boolean = false) {
-        loadLogoIndex()
+    @Synchronized fun load(force: Boolean = false) {
         val previous = job
+        previous?.cancel()
+        val src = activeSource
+        val format = prefs.liveFormat
+        val zip = prefs.localZip.value
+        val identity = src?.let { CatalogSnapshots.identity(it, format, zip) }
+        generation++
+        startupPhases.clear(); snapshots.readDiagnostics.clear()
+        // A refresh keeps the usable lineup. An account/format/market change cannot expose it.
+        if (identity != catalogueIdentity || src == null) clear()
+        else {
+            shortEpgTried.clear(); movieInfoCache.clear(); seriesInfoCache.clear()
+            val now = System.currentTimeMillis()
+            epg.entries.removeAll { (_, programs) -> programs.none { it.end > now } }
+            _epgVersion.value++
+        }
+        catalogueIdentity = identity
+        if (src == null || identity == null) { job = null; return }
+        val request = LoadRequest(src, identity, format, zip, generation, force)
         job = scope.launch {
-            previous?.cancelAndJoin()
-            clear()
-            val src = activeSource ?: return@launch
-            val dir = File(cacheRoot, src.id)
-            if (force) dir.listFiles()?.forEach { it.delete() }
+            if (!current(request)) return@launch
+            val dir = withContext(Dispatchers.IO) {
+                runCatching { sourceCacheDirectory(request) }.getOrElse { File(cacheRoot, request.identity.source).apply { mkdirs() } }
+            }
             when (src.type) {
-                SourceType.XTREAM -> loadXtream(src, dir)
-                SourceType.M3U -> loadM3u(src, dir)
+                SourceType.XTREAM -> loadXtream(request, dir)
+                SourceType.M3U -> loadM3u(request, dir)
             }
         }
     }
 
     private fun clear() {
-        generation++
         liveCategories.value = emptyList(); channels.value = emptyList(); trending.value = emptyList(); merged = emptyMap()
         movieCategories.value = emptyList(); movies.value = emptyList()
         seriesCategories.value = emptyList(); series.value = emptyList()
         epg.clear(); epgIcons.clear(); shortEpgTried.clear(); movieInfoCache.clear(); seriesInfoCache.clear()
+        deadNow.clear()
         _epgVersion.value++
         liveStatus.value = LoadStatus.Idle; vodStatus.value = LoadStatus.Idle
         seriesStatus.value = LoadStatus.Idle; epgStatus.value = LoadStatus.Idle
@@ -113,102 +141,278 @@ object Repo {
     private const val LIVE_AGE = 2 * 3600_000L
     private const val EPG_AGE = 6 * 3600_000L
     private const val FREE_EPG_AGE = 12 * 3600_000L
+    private const val TRENDING_AGE = 20 * 60_000L
     private const val LOGOS_URL = "https://iptv-org.github.io/api/logos.json"
 
-    private suspend fun loadXtream(src: Source, dir: File) = withContext(Dispatchers.IO) { supervisorScope {
+    private fun current(request: LoadRequest) = generation == request.generation && activeSource == request.source &&
+        prefs.liveFormat == request.format && prefs.localZip.value == request.zip
+
+    private inline fun commit(request: LoadRequest, action: () -> Unit) = synchronized(this) {
+        if (current(request)) action()
+    }
+
+    /** Bind an upgrade's old cache once; normal credential edits already forced its deletion. */
+    private fun sourceCacheDirectory(request: LoadRequest): File {
+        val dir = File(cacheRoot, request.identity.source).apply { mkdirs() }
+        val legacy = File(cacheRoot, request.source.id)
+        if (legacy.canonicalFile.parentFile != cacheRoot.canonicalFile || !legacy.isDirectory) return dir
+        val binding = File(legacy, "catalogue-identity")
+        if (request.force) {
+            legacy.listFiles()?.filter { it.isFile }?.forEach { it.delete() }
+            return dir
+        }
+        val bound = binding.takeIf { it.isFile }?.readText()?.trim()
+        if (bound != null && bound != request.identity.source) return dir
+        binding.writeText(request.identity.source)
+        listOf("live.json", "live_cats.json", "vod.json", "vod_cats.json", "series.json", "series_cats.json", "playlist.m3u", "trending.m3u", "epg.xml").forEach { name ->
+            val old = File(legacy, name); val target = File(dir, name)
+            if (old.isFile && old.length() > 0 && !target.exists()) {
+                old.copyTo(target); target.setLastModified(old.lastModified())
+            }
+        }
+        return dir
+    }
+
+    private fun cachedFile(file: File) = file.takeIf { it.isFile && it.length() > 0 }
+    private fun storedAt(vararg files: File) = files.minOf { it.lastModified() }.coerceAtLeast(1)
+    private fun fresh(at: Long, age: Long) = System.currentTimeMillis() - at < age
+    private fun saveSnapshot(write: () -> Unit) { runCatching(write) } // Disk exhaustion must not hide a usable catalogue.
+
+    private fun restoreLive(request: LoadRequest, live: CatalogSnapshots.Live) {
+        startupPhases["livePublish"] = "preparing"
+        val hidden = prefs.deadChannels()
+        val visible = live.channels.filterNot { it.key in hidden }
+        val used = visible.flatMapTo(HashSet()) { it.categoryIds }
+        commit(request) {
+            startupPhases["livePublish"] = "remapping"
+            val started = System.nanoTime()
+            prefs.remapChannelKeys(live.merged, request.source.id)
+            if (!current(request)) { startupPhases["livePublish"] = "discarded"; return@commit }
+            deadNow.clear(); deadNow.addAll(hidden)
+            merged = live.merged
+            startupPhases["liveRemapMs"] = ((System.nanoTime() - started) / 1_000_000).toString()
+            liveCategories.value = live.categories.filter { it.id in used }
+            channels.value = visible
+            liveStatus.value = LoadStatus.Ready
+            startupPhases["livePublish"] = "ready"
+        }
+    }
+
+    /** Current/next listings restore after channels, without delaying the usable guide lineup. */
+    private fun restoreGuide(request: LoadRequest): Long? {
+        val cached = snapshots.readGuide(request.identity) ?: return null
+        val wanted = channels.value.mapTo(HashSet()) { it.key }
+        commit(request) {
+            epg.putAll(cached.value.programs.filterKeys { it in wanted && !hasGuide(it) })
+            epgIcons.putAll(cached.value.icons.filterKeys { it in wanted })
+            if (epg.isNotEmpty()) { _epgVersion.value++; _logoVersion.value++; epgStatus.value = LoadStatus.Ready }
+        }
+        return cached.storedAt
+    }
+
+    private suspend fun loadXtream(request: LoadRequest, dir: File) = withContext(Dispatchers.IO) { supervisorScope {
+        val src = request.source
         val x = Xtream(src)
         val ua = src.userAgent
+        val liveAvailable = CompletableDeferred<Unit>()
+        val liveCacheAttempted = CompletableDeferred<Unit>()
         val live = launch {
-            liveStatus.value = LoadStatus.Loading("Loading channels…")
             try {
+                // Decode the interactive lineup first. Large library allocations can delay it by seconds.
+                val cached = try {
+                    snapshots.readLive(request.identity).also { value ->
+                        value?.let { restoreLive(request, it.value); liveAvailable.complete(Unit) }
+                    }
+                } finally { liveCacheAttempted.complete(Unit) }
+                if (cached != null && cached.fresh(LIVE_AGE) && !request.force) return@launch
+                commit(request) { liveStatus.value = LoadStatus.Loading(if (channels.value.isEmpty()) "Loading channels…" else "Refreshing channels…") }
+                val listFile = File(dir, "live.json"); val categoriesFile = File(dir, "live_cats.json")
+                var availableAt = cached?.storedAt
+                if (cached == null && !request.force && cachedFile(listFile) != null && cachedFile(categoriesFile) != null) {
+                    publishLive(ContentPolicy.live(x.parseLive(listFile, request.format), x.parseCategories(categoriesFile)), request, storedAt(listFile, categoriesFile))
+                    liveAvailable.complete(Unit)
+                    availableAt = storedAt(listFile, categoriesFile)
+                    if (fresh(storedAt(listFile, categoriesFile), LIVE_AGE)) return@launch
+                }
                 supervisorScope {
-                    val catsF = async { Net.download(x.api("get_live_categories"), ua, File(dir, "live_cats.json"), LIVE_AGE, false) }
-                    val listF = async { Net.download(x.api("get_live_streams"), ua, File(dir, "live.json"), LIVE_AGE, false) }
-                    publishLive(ContentPolicy.live(x.parseLive(listF.await(), prefs.liveFormat), x.parseCategories(catsF.await())))
+                    val before = listFile.lastModified() to categoriesFile.lastModified()
+                    val catsF = async { Net.download(x.api("get_live_categories"), ua, categoriesFile, LIVE_AGE, request.force) }
+                    val listF = async { Net.download(x.api("get_live_streams"), ua, listFile, LIVE_AGE, request.force) }
+                    val cats = catsF.await(); val list = listF.await()
+                    coroutineContext.ensureActive()
+                    if (storedAt(list, cats) != availableAt || before != (list.lastModified() to cats.lastModified()))
+                        publishLive(ContentPolicy.live(x.parseLive(list, request.format), x.parseCategories(cats)), request, storedAt(list, cats))
+                    liveAvailable.complete(Unit)
                 }
-                liveStatus.value = LoadStatus.Ready
+                commit(request) { liveStatus.value = LoadStatus.Ready }
             } catch (e: kotlinx.coroutines.CancellationException) { throw e }
-            catch (e: Exception) { liveStatus.value = LoadStatus.Error(friendly(e)) }
+            catch (e: Exception) { commit(request) { liveStatus.value = LoadStatus.Error(friendly(e)) } }
+            finally { liveCacheAttempted.complete(Unit); liveAvailable.complete(Unit) }
         }
 
-        launch { live.join(); loadTrending(src, dir) }
-        launch { live.join(); loadGuides(src.epgUrl.ifBlank { x.xmltv() }, ua, dir) }
+        launch { liveAvailable.await(); if (current(request)) loadLogoIndex() }
+        launch { liveAvailable.await(); if (current(request)) loadTrending(request, dir) }
+        launch { liveAvailable.await(); if (current(request) && channels.value.isNotEmpty()) {
+            restoreGuide(request)
+            live.join()
+            if (!current(request)) return@launch
+            // The bounded startup guide is immediately useful; hydrate the full three-day guide separately.
+            loadGuides(src.epgUrl.ifBlank { x.xmltv() }, ua, dir, request)
+        } }
 
         launch {
-            vodStatus.value = LoadStatus.Loading("Loading movies…")
+            liveCacheAttempted.await()
             try {
-                val catalogue = supervisorScope {
-                    val c = async { Net.download(x.api("get_vod_categories"), ua, File(dir, "vod_cats.json"), LIST_AGE, false) }
-                    val l = async { Net.download(x.api("get_vod_streams"), ua, File(dir, "vod.json"), LIST_AGE, false) }
-                    ContentPolicy.movies(x.parseMovies(l.await()), x.parseCategories(c.await()))
+                val cached = snapshots.readMovies(request.identity)
+                cached?.let {
+                    startupPhases["moviePublish"] = "waiting"
+                    commit(request) { movieCategories.value = it.value.categories; movies.value = it.value.items; vodStatus.value = LoadStatus.Ready; startupPhases["moviePublish"] = "ready" }
                 }
-                movieCategories.value = catalogue.categories
-                movies.value = Cleanup.movies(catalogue.items)
-                vodStatus.value = LoadStatus.Ready
+                if (cached != null && cached.fresh(LIST_AGE) && !request.force) return@launch
+                commit(request) { vodStatus.value = LoadStatus.Loading(if (movies.value.isEmpty()) "Loading movies…" else "Refreshing movies…") }
+                val listFile = File(dir, "vod.json"); val categoriesFile = File(dir, "vod_cats.json")
+                fun publish(list: File, categories: File) {
+                    if (!current(request)) return
+                    val catalogue = ContentPolicy.movies(x.parseMovies(list), x.parseCategories(categories))
+                    val cleaned = Cleanup.movies(catalogue.items)
+                    commit(request) { movieCategories.value = catalogue.categories; movies.value = cleaned; vodStatus.value = LoadStatus.Ready }
+                    if (current(request)) saveSnapshot { snapshots.writeMovies(request.identity, ContentPolicy.Catalogue(cleaned, catalogue.categories), storedAt(list, categories)) }
+                }
+                var availableAt = cached?.storedAt
+                if (cached == null && !request.force && cachedFile(listFile) != null && cachedFile(categoriesFile) != null) {
+                    publish(listFile, categoriesFile)
+                    availableAt = storedAt(listFile, categoriesFile)
+                    if (fresh(storedAt(listFile, categoriesFile), LIST_AGE)) return@launch
+                }
+                supervisorScope {
+                    val before = listFile.lastModified() to categoriesFile.lastModified()
+                    val c = async { Net.download(x.api("get_vod_categories"), ua, categoriesFile, LIST_AGE, request.force) }
+                    val l = async { Net.download(x.api("get_vod_streams"), ua, listFile, LIST_AGE, request.force) }
+                    val list = l.await(); val categories = c.await()
+                    coroutineContext.ensureActive()
+                    if (storedAt(list, categories) != availableAt || before != (list.lastModified() to categories.lastModified())) publish(list, categories)
+                }
+                commit(request) { vodStatus.value = LoadStatus.Ready }
             } catch (e: kotlinx.coroutines.CancellationException) { throw e }
-            catch (e: Exception) { vodStatus.value = LoadStatus.Error(friendly(e)) }
+            catch (e: Exception) { commit(request) { vodStatus.value = LoadStatus.Error(friendly(e)) } }
         }
 
         launch {
-            seriesStatus.value = LoadStatus.Loading("Loading series…")
+            liveCacheAttempted.await()
             try {
-                val catalogue = supervisorScope {
-                    val c = async { Net.download(x.api("get_series_categories"), ua, File(dir, "series_cats.json"), LIST_AGE, false) }
-                    val l = async { Net.download(x.api("get_series"), ua, File(dir, "series.json"), LIST_AGE, false) }
-                    ContentPolicy.series(x.parseSeries(l.await()), x.parseCategories(c.await()))
+                val cached = snapshots.readSeries(request.identity)
+                cached?.let { commit(request) { seriesCategories.value = it.value.categories; series.value = it.value.items; seriesStatus.value = LoadStatus.Ready } }
+                if (cached != null && cached.fresh(LIST_AGE) && !request.force) return@launch
+                commit(request) { seriesStatus.value = LoadStatus.Loading(if (series.value.isEmpty()) "Loading series…" else "Refreshing series…") }
+                val listFile = File(dir, "series.json"); val categoriesFile = File(dir, "series_cats.json")
+                fun publish(list: File, categories: File) {
+                    if (!current(request)) return
+                    val catalogue = ContentPolicy.series(x.parseSeries(list), x.parseCategories(categories))
+                    commit(request) { seriesCategories.value = catalogue.categories; series.value = catalogue.items; seriesStatus.value = LoadStatus.Ready }
+                    if (current(request)) saveSnapshot { snapshots.writeSeries(request.identity, catalogue, storedAt(list, categories)) }
                 }
-                seriesCategories.value = catalogue.categories
-                series.value = catalogue.items
-                seriesStatus.value = LoadStatus.Ready
+                var availableAt = cached?.storedAt
+                if (cached == null && !request.force && cachedFile(listFile) != null && cachedFile(categoriesFile) != null) {
+                    publish(listFile, categoriesFile)
+                    availableAt = storedAt(listFile, categoriesFile)
+                    if (fresh(storedAt(listFile, categoriesFile), LIST_AGE)) return@launch
+                }
+                supervisorScope {
+                    val before = listFile.lastModified() to categoriesFile.lastModified()
+                    val c = async { Net.download(x.api("get_series_categories"), ua, categoriesFile, LIST_AGE, request.force) }
+                    val l = async { Net.download(x.api("get_series"), ua, listFile, LIST_AGE, request.force) }
+                    val list = l.await(); val categories = c.await()
+                    coroutineContext.ensureActive()
+                    if (storedAt(list, categories) != availableAt || before != (list.lastModified() to categories.lastModified())) publish(list, categories)
+                }
+                commit(request) { seriesStatus.value = LoadStatus.Ready }
             } catch (e: kotlinx.coroutines.CancellationException) { throw e }
-            catch (e: Exception) { seriesStatus.value = LoadStatus.Error(friendly(e)) }
+            catch (e: Exception) { commit(request) { seriesStatus.value = LoadStatus.Error(friendly(e)) } }
         }
     } }
 
-    private suspend fun loadM3u(src: Source, dir: File) = withContext(Dispatchers.IO) {
-        liveStatus.value = LoadStatus.Loading("Loading playlist…")
-        vodStatus.value = LoadStatus.Loading("Loading playlist…")
-        seriesStatus.value = LoadStatus.Ready
-        try {
-            val f = Net.download(src.m3uUrl, src.userAgent, File(dir, "playlist.m3u"), LIST_AGE, false)
-            val r = M3u.parse(f)
-            val vod = ContentPolicy.movies(r.movies, r.movieCategories)
-            publishLive(ContentPolicy.live(r.channels, r.liveCategories))
-            movieCategories.value = vod.categories
-            movies.value = Cleanup.movies(vod.items)
-            liveStatus.value = LoadStatus.Ready
-            vodStatus.value = LoadStatus.Ready
-            launch { loadTrending(src, dir) }
-            val epgUrl = src.epgUrl.ifBlank { r.epgUrl ?: "" }
-            launch { loadGuides(epgUrl, src.userAgent, dir) }
-        } catch (e: Exception) {
-            liveStatus.value = LoadStatus.Error(friendly(e))
-            vodStatus.value = LoadStatus.Error(friendly(e))
+    private suspend fun loadM3u(request: LoadRequest, dir: File) = withContext(Dispatchers.IO) { supervisorScope {
+        val src = request.source
+        commit(request) { seriesStatus.value = LoadStatus.Ready }
+        val liveAvailable = CompletableDeferred<Unit>()
+        val discoveredGuide = File(dir, "playlist-epg-url")
+        var epgUrl = src.epgUrl.ifBlank { runCatching { discoveredGuide.readText() }.getOrDefault("") }
+        val live = launch {
+            try {
+                val cachedLive = snapshots.readLive(request.identity)
+                cachedLive?.let { restoreLive(request, it.value); liveAvailable.complete(Unit) }
+                val cachedMovies = snapshots.readMovies(request.identity)
+                cachedMovies?.let { commit(request) { movieCategories.value = it.value.categories; movies.value = it.value.items; vodStatus.value = LoadStatus.Ready } }
+                if (cachedLive != null && cachedLive.fresh(LIVE_AGE) && cachedMovies != null && cachedMovies.fresh(LIST_AGE) && !request.force) return@launch
+                val playlistFile = File(dir, "playlist.m3u")
+                fun publish(file: File) {
+                    if (!current(request)) return
+                    val r = M3u.parse(file)
+                    publishLive(ContentPolicy.live(r.channels, r.liveCategories), request, file.lastModified())
+                    liveAvailable.complete(Unit)
+                    val vod = ContentPolicy.movies(r.movies, r.movieCategories)
+                    val cleaned = Cleanup.movies(vod.items)
+                    commit(request) { movieCategories.value = vod.categories; movies.value = cleaned; vodStatus.value = LoadStatus.Ready }
+                    if (current(request)) saveSnapshot { snapshots.writeMovies(request.identity, ContentPolicy.Catalogue(cleaned, vod.categories), file.lastModified()) }
+                    epgUrl = src.epgUrl.ifBlank { r.epgUrl ?: "" }
+                    saveSnapshot { discoveredGuide.writeText(epgUrl) }
+                }
+                var availableAt = if (cachedLive?.storedAt == cachedMovies?.storedAt) cachedLive?.storedAt else null
+                if ((cachedLive == null || cachedMovies == null) && !request.force && cachedFile(playlistFile) != null) {
+                    publish(playlistFile)
+                    availableAt = playlistFile.lastModified()
+                    if (fresh(playlistFile.lastModified(), LIVE_AGE)) return@launch
+                }
+                commit(request) {
+                    liveStatus.value = LoadStatus.Loading(if (channels.value.isEmpty()) "Loading playlist…" else "Refreshing playlist…")
+                    vodStatus.value = LoadStatus.Loading(if (movies.value.isEmpty()) "Loading playlist…" else "Refreshing playlist…")
+                }
+                val file = Net.download(src.m3uUrl, src.userAgent, playlistFile, LIVE_AGE, request.force)
+                coroutineContext.ensureActive()
+                if (file.lastModified() != availableAt) publish(file)
+                commit(request) { liveStatus.value = LoadStatus.Ready; vodStatus.value = LoadStatus.Ready }
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (e: Exception) { commit(request) { liveStatus.value = LoadStatus.Error(friendly(e)); vodStatus.value = LoadStatus.Error(friendly(e)) } }
+            finally { liveAvailable.complete(Unit) }
         }
-    }
+        launch { liveAvailable.await(); if (current(request)) loadLogoIndex() }
+        launch { liveAvailable.await(); if (current(request)) loadTrending(request, dir) }
+        launch { liveAvailable.await(); if (current(request) && channels.value.isNotEmpty()) {
+            restoreGuide(request)
+            live.join()
+            if (!current(request)) return@launch
+            loadGuides(epgUrl, src.userAgent, dir, request)
+        } }
+    } }
 
     /** Copies folded into another channel by [Cleanup.lineup]: folded key to the key of the channel that kept it. */
     @Volatile private var merged: Map<String, String> = emptyMap()
     private val deadNow: MutableSet<String> = Collections.newSetFromMap(ConcurrentHashMap())
 
     /** Cleans the lineup (names, duplicates, empty event slots, channels that recently failed) and publishes it. */
-    private fun publishLive(catalogue: ContentPolicy.Catalogue<Channel>) {
-        val localCatalogue = LocalLineup.filterCatalogue(catalogue, prefs.localZip.value)
+    private fun publishLive(catalogue: ContentPolicy.Catalogue<Channel>, request: LoadRequest, storedAt: Long) {
+        if (!current(request)) return
+        val localCatalogue = LocalLineup.filterCatalogue(catalogue, request.zip)
         val hidden = prefs.deadChannels()
-        deadNow.clear(); deadNow.addAll(hidden)
         val lineup = Cleanup.lineup(localCatalogue.items, localCatalogue.categories, hidden = hidden)
-        merged = lineup.merged
-        prefs.remapChannelKeys(lineup.merged)
+        if (!current(request)) return
         val used = lineup.channels.flatMapTo(HashSet()) { it.categoryIds }
-        liveCategories.value = localCatalogue.categories.filter { it.id in used }
-        channels.value = lineup.channels
+        val categories = localCatalogue.categories.filter { it.id in used }
+        commit(request) {
+            prefs.remapChannelKeys(lineup.merged, request.source.id)
+            if (!current(request)) return@commit
+            deadNow.clear(); deadNow.addAll(hidden)
+            merged = lineup.merged
+            liveCategories.value = categories; channels.value = lineup.channels; liveStatus.value = LoadStatus.Ready
+        }
+        if (current(request)) saveSnapshot { snapshots.writeLive(request.identity, CatalogSnapshots.Live(lineup.channels, categories, lineup.merged), storedAt) }
     }
 
     /**
      * A channel failed on its main source and every backup. It leaves the guide now and stays hidden for
      * [Prefs.DEAD_FOR_MS], together with the copies that were folded into it, then gets another chance.
      */
-    fun reportDead(key: String) {
+    @Synchronized fun reportDead(key: String) {
         deadNow += key
         prefs.markDead(merged.filterValues { it == key }.keys + key)
         channels.value = channels.value.filterNot { it.key == key }
@@ -221,6 +425,7 @@ object Repo {
     fun restoreHiddenChannels() {
         prefs.clearDead()
         deadNow.clear()
+        catalogueIdentity?.let { snapshots.invalidateLive(it) }
         load()
     }
 
@@ -229,14 +434,19 @@ object Repo {
      * stream id), so favorites, numbers and guide data carry over. Event feeds that are only in
      * the trending list get appended as extra channels.
      */
-    private suspend fun loadTrending(src: Source, dir: File) {
+    private suspend fun loadTrending(request: LoadRequest, dir: File) {
+        val src = request.source
         if (src.hotUrl.isBlank()) return
-        runCatching {
-            val f = Net.download(src.hotUrl, src.userAgent, File(dir, "trending.m3u"), 20 * 60_000L, false)
+        try {
+            val cached = snapshots.readTrending(request.identity)
+            cached?.let { commit(request) { trending.value = it.value.channels.filterNot { c -> c.key in deadNow } } }
+            if (cached != null && cached.fresh(TRENDING_AGE) && !request.force) return
+            val f = Net.download(src.hotUrl, src.userAgent, File(dir, "trending.m3u"), TRENDING_AGE, request.force)
+            if (cached?.storedAt == f.lastModified()) return
             val playlist = M3u.parse(f)
             val now = System.currentTimeMillis()
             val dead = prefs.deadChannels(now)
-            val parsed = LocalLineup.filterCatalogue(ContentPolicy.live(playlist.channels, playlist.liveCategories), prefs.localZip.value).items
+            val parsed = LocalLineup.filterCatalogue(ContentPolicy.live(playlist.channels, playlist.liveCategories), request.zip).items
                 .filterNot { Cleanup.isIdleEvent(it.name) || Cleanup.isOffAir(it.name, now) }
                 .sortedBy { it.key.substringAfterLast(':').toIntOrNull() ?: 0 }
             fun sid(url: String) = url.substringBefore('?').substringAfterLast('/').substringBefore('.')
@@ -245,44 +455,60 @@ object Repo {
             channels.value.forEach { c -> c.backups.forEach { known.getOrPut(sid(it)) { c } } }
             channels.value.forEach { c -> known[c.streamId ?: sid(c.url)] = c }
             var extra = (channels.value.maxOfOrNull { it.number } ?: 0) + 1
-            trending.value = parsed.map { t ->
+            if (!current(request)) return
+            val result = parsed.map { t ->
                 known[sid(t.url)] ?: t.copy(key = "h:" + sid(t.url), name = Cleanup.displayName(t.name), number = extra++,
                     categoryId = "__hot", categoryIds = listOf("__hot"))
             }.distinctBy { it.key }.filterNot { it.key in dead }
-        }
+            commit(request) { trending.value = result }
+            if (current(request)) saveSnapshot { snapshots.writeTrending(request.identity, result, f.lastModified()) }
+        } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+        catch (_: Exception) { /* An optional provider list never removes the usable main lineup. */ }
     }
 
     /** Provider guide first, then free regional guides for whatever is still missing. */
-    private suspend fun loadGuides(providerUrl: String?, ua: String, dir: File) {
-        epgStatus.value = LoadStatus.Loading("Loading guide…")
+    private suspend fun loadGuides(providerUrl: String?, ua: String, dir: File, request: LoadRequest) {
+        if (!current(request)) return
+        commit(request) { epgStatus.value = LoadStatus.Loading("Loading guide…") }
         var providerError: String? = null
         if (!providerUrl.isNullOrBlank()) {
             try {
-                applyGuide(Net.download(providerUrl, ua, File(dir, "epg.xml"), EPG_AGE, false), onlyMissing = false)
-            } catch (e: Exception) {
+                applyGuide(Net.download(providerUrl, ua, File(dir, "epg.xml"), EPG_AGE, request.force), onlyMissing = false, request.generation)
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (e: Exception) {
                 providerError = friendly(e)
             }
         }
-        loadFreeGuides()
-        val have = channels.value.count { epg.containsKey(it.key) }
-        epgStatus.value = if (have > 0) LoadStatus.Ready
-        else LoadStatus.Error(providerError ?: "No guide data found for these channels")
+        if (!current(request)) return
+        loadFreeGuides(request.generation)
+        if (!current(request)) return
+        var guide: CatalogSnapshots.Guide? = null
+        commit(request) {
+            val have = channels.value.count { hasGuide(it.key) }
+            epgStatus.value = if (have > 0) LoadStatus.Ready else LoadStatus.Error(providerError ?: "No guide data found for these channels")
+            if (have > 0) guide = CatalogSnapshots.Guide(epg.toMap(), epgIcons.toMap())
+        }
+        guide?.let { saveSnapshot { snapshots.writeGuide(request.identity, it, System.currentTimeMillis()) } }
     }
 
-    private suspend fun loadFreeGuides() {
+    private fun hasGuide(key: String, now: Long = System.currentTimeMillis()) = epg[key]?.any { it.end > now && !it.placeholder } == true
+
+    private suspend fun loadFreeGuides(expectedGeneration: Long = generation) {
         for (code in prefs.freeEpgRegions) {
-            if (channels.value.all { epg.containsKey(it.key) }) break
-            epgStatus.value = LoadStatus.Loading("Finding free guide data…")
-            runCatching {
+            if (expectedGeneration != generation) return
+            if (channels.value.all { hasGuide(it.key) }) break
+            synchronized(this) { if (expectedGeneration == generation) epgStatus.value = LoadStatus.Loading("Finding free guide data…") }
+            try {
                 val f = Net.download(FreeEpg.url(code), DEFAULT_UA, File(cacheRoot, "free/$code.xml.gz"), FREE_EPG_AGE, false)
-                applyGuide(f, onlyMissing = true)
-            }
+                applyGuide(f, onlyMissing = true, expectedGeneration)
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (_: Exception) { /* Keep available provider/region listings when another region fails. */ }
         }
     }
 
     /** Matches an XMLTV file against our channels by id, then by fuzzy name. Returns channels matched. */
-    private fun applyGuide(f: File, onlyMissing: Boolean): Int {
-        val chans = channels.value.filter { !onlyMissing || !epg.containsKey(it.key) }
+    private fun applyGuide(f: File, onlyMissing: Boolean, expectedGeneration: Long = generation): Int {
+        val chans = channels.value.filter { !onlyMissing || !hasGuide(it.key) }
         if (chans.isEmpty()) return 0
         val wanted = chans.mapNotNullTo(HashSet()) { it.epgId?.lowercase() }
         val keys = HashSet<String>()
@@ -293,6 +519,8 @@ object Repo {
         keys.removeAll { it.length < 2 }
         val now = System.currentTimeMillis()
         val res = Xmltv.parse(f, wanted, keys, now - 4 * 3600_000L, now + 3 * 24 * 3600_000L)
+        return synchronized(this) {
+        if (expectedGeneration != generation) return@synchronized 0
         var matched = 0
         var newIcons = false
         for (c in chans) {
@@ -301,12 +529,13 @@ object Repo {
                 ?: id?.let { res.nameToId[ChannelMatch.key(it)] ?: res.nameToId[ChannelMatch.idKey(it)] }
                 ?: ChannelMatch.key(c.name).takeIf { it.length >= 2 }?.let { res.nameToId[it] }
                 ?: continue
-            res.programs[xid]?.takeIf { it.isNotEmpty() }?.let { if (!onlyMissing || !epg.containsKey(c.key)) { epg[c.key] = it; matched++ } }
+            res.programs[xid]?.takeIf { rows -> rows.any { it.end > now && !it.placeholder } }?.let { if (!onlyMissing || !hasGuide(c.key, now)) { epg[c.key] = it; matched++ } }
             res.icons[xid]?.let { if (epgIcons.putIfAbsent(c.key, it) == null) newIcons = true }
         }
         _epgVersion.value++
         if (newIcons) _logoVersion.value++
-        return matched
+        matched
+        }
     }
 
     // ------------------------------------------------------------------ logos
@@ -356,14 +585,14 @@ object Repo {
         val x = Xtream(src)
         visible.forEach { c ->
             val sid = c.streamId ?: return@forEach
-            if (epg.containsKey(c.key) || !shortEpgTried.add(c.key)) return@forEach
+            if (hasGuide(c.key) || !shortEpgTried.add(c.key)) return@forEach
             scope.launch(Dispatchers.IO) {
                 shortEpgGate.withPermit {
                     runCatching {
                         val list = x.parseShortEpg(Net.getString(x.api("get_short_epg", "&stream_id=$sid&limit=24"), src.userAgent))
-                        if (requestedGeneration == generation && activeSource?.id == src.id && list.isNotEmpty() && !epg.containsKey(c.key)) {
+                        synchronized(this@Repo) { if (requestedGeneration == generation && activeSource == src && list.any { it.end > System.currentTimeMillis() } && !hasGuide(c.key)) {
                             epg[c.key] = list; _epgVersion.value++
-                        }
+                        } }
                     }
                 }
             }
@@ -380,7 +609,9 @@ object Repo {
         val x = Xtream(src)
         return runCatching {
             x.parseMovieInfo(Net.getString(x.api("get_vod_info", "&vod_id=${m.id.removePrefix("m:")}"), src.userAgent))
-        }.getOrNull()?.takeIf { requestedGeneration == generation && activeSource?.id == src.id }?.also { movieInfoCache[m.id] = it }
+        }.getOrNull()?.let { result -> synchronized(this) {
+            result.takeIf { requestedGeneration == generation && activeSource == src }?.also { movieInfoCache[m.id] = it }
+        } }
     }
 
     suspend fun seriesInfo(s: Series): SeriesInfo? {
@@ -390,7 +621,9 @@ object Repo {
         val x = Xtream(src)
         return runCatching {
             x.parseSeriesInfo(Net.getString(x.api("get_series_info", "&series_id=${s.id}"), src.userAgent))
-        }.getOrNull()?.takeIf { requestedGeneration == generation && activeSource?.id == src.id }?.also { seriesInfoCache[s.id] = it }
+        }.getOrNull()?.let { result -> synchronized(this) {
+            result.takeIf { requestedGeneration == generation && activeSource == src }?.also { seriesInfoCache[s.id] = it }
+        } }
     }
 
     /** Checks Xtream credentials and returns a one-line account summary. */
@@ -408,17 +641,28 @@ object Repo {
         parts.joinToString(" · ")
     }.recoverCatching { throw Exception(friendly(it)) }
 
-    fun clearCache() {
+    @Synchronized fun clearCache() {
+        job?.cancel()
+        generation++
+        if (liveStatus.value is LoadStatus.Loading) liveStatus.value = LoadStatus.Idle
+        if (vodStatus.value is LoadStatus.Loading) vodStatus.value = LoadStatus.Idle
+        if (seriesStatus.value is LoadStatus.Loading) seriesStatus.value = LoadStatus.Idle
+        if (epgStatus.value is LoadStatus.Loading) epgStatus.value = LoadStatus.Idle
         cacheRoot.deleteRecursively()
+        snapshotRoot.deleteRecursively()
+        logoJob?.cancel()
         logoJob = null
     }
 
     /** Re-run only the free-guide pass (after changing regions in Settings). */
     fun reloadFreeGuides() {
+        val expectedGeneration = generation
         scope.launch(Dispatchers.IO) {
-            loadFreeGuides()
-            val have = channels.value.count { epg.containsKey(it.key) }
-            epgStatus.value = if (have > 0) LoadStatus.Ready else LoadStatus.Error("No guide data found for these channels")
+            loadFreeGuides(expectedGeneration)
+            synchronized(this@Repo) { if (expectedGeneration == generation) {
+                val have = channels.value.count { hasGuide(it.key) }
+                epgStatus.value = if (have > 0) LoadStatus.Ready else LoadStatus.Error("No guide data found for these channels")
+            } }
         }
     }
 

@@ -1,8 +1,12 @@
 # Tuner for Samsung Tizen TV
 
-This is a Samsung TV web application, separate from the Android APK. It provides Live TV with a guide and preview, Movies, Series, Search, Favorites and Settings, using a directional pad, OK and Back. The application/package IDs are `TunerTv001.Tuner` / `TunerTv001`; version is 1.4.0.
+This is a Samsung TV web application, separate from the Android APK. It provides Live TV with a guide and preview, Movies, Series, Search, Favorites and Settings, using a directional pad, OK and Back. The application/package IDs are `TunerTv001.Tuner` / `TunerTv001`; version is 1.4.1.
 
 The runtime uses ES5 JavaScript, local HTML/CSS and Samsung's built-in AVPlay. HTTP(S) provider requests and artwork are allowed; scripts are restricted to the packaged application and the TV's local WebAPI library. No remote scripts, inline script handlers or eval are permitted. Provider accounts are entered on the device and must never be embedded in a widget or committed to source.
+
+The first load of a new playlist downloads and prepares the provider's catalogs. Live TV, Movies and Series load independently, so each section becomes available when it finishes. Later launches restore the finished catalogs from the TV's private storage, without repeating their parsing and filtering. Fresh saved catalogs skip provider list requests for two hours for Live TV and twelve hours for Movies and Series. Older catalogs remain available while updates run in the background; guide listings load separately.
+
+Changing the account, local ZIP or live stream format selects a separate cache. Refresh requests new provider lists while keeping the saved library available. Storage failures fall back to provider loading, with a bounded saved Live TV catalog where local storage permits it. The cache speeds up repeat launches; the first provider load still depends on the network and provider response. Cache identity metadata uses a SHA-256 digest of the account and lineup configuration.
 
 ## Prepare and check the widget
 
@@ -15,7 +19,7 @@ npm test
 npm run build
 ```
 
-The build copies only `config.xml`, `index.html`, `css/app.css`, the three runtime JavaScript files, and `assets/icon.png`. Tools, tests, node_modules, provider exports, preferences and certificates are excluded. Outputs go to `../../output/tizen`, outside the source checkout. Every build creates clean staging, validates ES5 syntax, application identifiers, privileges, CSP and ZIP checksums, and produces `Tuner-1.4.0-tizen-UNSIGNED.wgt`.
+The build copies only `config.xml`, `index.html`, `css/app.css`, the three runtime JavaScript files, and `assets/icon.png`. Tools, tests, node_modules, provider exports, preferences and certificates are excluded. Outputs go to `../../output/tizen`, outside the source checkout. Every build creates clean staging, validates ES5 syntax, application identifiers, privileges, CSP and ZIP checksums, and produces `Tuner-1.4.1-tizen-UNSIGNED.wgt`.
 
 **The unsigned widget is a staging artifact. It cannot be installed on a physical Samsung TV.** It needs a Samsung author/distributor certificate profile containing the target TV's DUID.
 
@@ -67,7 +71,7 @@ After that one-time profile setup:
 
 ```powershell
 .\tools\Package-Tizen.ps1 -CertificateProfile TunerTV
-.\tools\Install-Tizen.ps1 -TvAddress 192.168.1.50 -Widget ..\..\output\tizen\Tuner-1.4.0-tizen.wgt -Launch
+.\tools\Install-Tizen.ps1 -TvAddress 192.168.1.50 -Widget ..\..\output\tizen\Tuner-1.4.1-tizen.wgt -Launch
 ```
 
 The package script builds fresh staging, invokes the official signer and checks that both widget signature files exist. Their presence does not prove validity: the Samsung CLI and the target TV perform certificate validation. The installer rejects unsigned widgets, checks the developer port, uses an explicit device serial, and only launches Tuner when `-Launch` is supplied. It does not uninstall other applications or reset TV settings.

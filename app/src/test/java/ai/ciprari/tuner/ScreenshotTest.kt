@@ -7,6 +7,7 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.core.view.drawToBitmap
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.pressKey
@@ -64,6 +65,17 @@ class ScreenshotTest {
         view.layout(0, 0, view.width, view.height)
         val bmp = view.drawToBitmap()
         File(out, "$name.png").outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+    }
+
+    private fun awaitBrowse(state: AppState) {
+        val prefix = if (state.tab == Tab.MOVIES) "movies" else "series"
+        rule.waitUntil(timeoutMillis = 5_000) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            rule.runOnIdle { androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications() }
+            rule.mainClock.advanceTimeByFrame()
+            rule.onAllNodesWithTag("browse-content:$prefix").fetchSemanticsNodes().isNotEmpty() &&
+                !state.restoreFocus && state.lastFocusedKey?.startsWith("$prefix:") == true
+        }
     }
 
     /** TV remotes put Compose in keyboard input mode; tests start in touch mode. */
@@ -168,6 +180,7 @@ class ScreenshotTest {
         rule.mainClock.autoAdvance = false
         rule.setContent { KeyboardMode { TunerTheme { HomeScreen(state) } } }
         rule.mainClock.advanceTimeBy(800)
+        awaitBrowse(state)
         shot("06_movies")
     }
 
@@ -176,6 +189,7 @@ class ScreenshotTest {
         rule.mainClock.autoAdvance = false
         rule.setContent { KeyboardMode { TunerTheme { HomeScreen(state) } } }
         rule.mainClock.advanceTimeBy(800)
+        awaitBrowse(state)
         shot("15_series")
     }
 
@@ -188,9 +202,11 @@ class ScreenshotTest {
         shot("16_compact_guide")
         rule.runOnIdle { state.tab = Tab.MOVIES; state.restoreFocus = true; androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications() }
         rule.mainClock.advanceTimeBy(800)
+        awaitBrowse(state)
         shot("17_compact_movies")
         rule.runOnIdle { state.tab = Tab.SERIES; state.restoreFocus = true; androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications() }
         rule.mainClock.advanceTimeBy(800)
+        awaitBrowse(state)
         shot("18_compact_series")
     }
 
@@ -208,6 +224,7 @@ class ScreenshotTest {
         rule.onRoot().performKeyInput { pressKey(Key.Enter) }
         rule.mainClock.advanceTimeBy(800)
         rule.runOnIdle { assertEquals(Tab.SERIES, state.tab) }
+        awaitBrowse(state)
         shot("19_navigation_series")
     }
 
@@ -223,6 +240,7 @@ class ScreenshotTest {
             }
         }
         rule.mainClock.advanceTimeBy(800)
+        awaitBrowse(state)
         rule.onRoot().performKeyInput { repeat(4) { pressKey(Key.DirectionRight) } }
         rule.mainClock.advanceTimeBy(500)
         var expected = ""
@@ -235,10 +253,12 @@ class ScreenshotTest {
             androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
         }
         rule.mainClock.advanceTimeBy(800)
+        awaitBrowse(state)
         rule.runOnIdle {
             assertEquals(expected, state.lastFocusedKey)
             assertFalse("Returning should restore an attached card's remote focus", state.restoreFocus)
         }
+        awaitBrowse(state)
         shot("20_movie_focus_restored")
     }
 
@@ -291,6 +311,7 @@ class ScreenshotTest {
         rule.mainClock.autoAdvance = false
         rule.setContent { KeyboardMode { TunerTheme { HomeScreen(state) } } }
         rule.mainClock.advanceTimeBy(800)
+        awaitBrowse(state)
         shot("21_small_movies")
     }
 

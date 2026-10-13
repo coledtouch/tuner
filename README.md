@@ -1,6 +1,6 @@
 # Tuner
 
-IPTV player for Android TV and Google TV. Cable-style Live TV guide, live preview, movies, series, search, and themes. Version 1.4.0 separates guide browsing from channel changes, adds native Picture-in-Picture, and improves navigation and Favorites, with unrestricted audio and an integrated Streaming tab.
+IPTV player for Android TV and Google TV. Cable-style Live TV guide, live preview, movies, series, search, and themes. Version 1.5.0 adds fast saved-library startup, two-channel Multi View with side-by-side or in-app Picture in Picture, a True Black theme, personal Most Watched, and a labelled navigation bar that scrolls on smaller screens. Guide browsing, Favorites, unrestricted movie and series audio, native Android Picture-in-Picture, and the integrated Streaming tab remain available.
 
 The [Samsung Tizen TV app](tizen/README.md) provides Live TV, Movies, Series, Search, a black theme, and two-channel side-by-side or in-app Picture in Picture. It is built and signed separately from the Android APK using a Samsung TV certificate.
 
@@ -13,7 +13,7 @@ The [Samsung Tizen TV app](tizen/README.md) provides Live TV, Movies, Series, Se
 
 ```powershell
 adb connect 192.168.1.50:5555
-adb install -r .\Tuner-1.4.0.apk
+adb install -r .\Tuner-1.5.0.apk
 ```
 
 Accept the debugging prompt on the TV the first time. Tuner shows up in your Apps row.
@@ -28,11 +28,11 @@ If you only have a link like `http://host:port/get.php?username=...&password=...
 
 ## Remote controls
 
-The main controls match the onn 4K remote: the directional pad, center OK, Back, and Channel +/−. Use Left / Right in the top navigation, then OK to open Live TV, Movies, Series, Streaming, Search, or Settings. Moving across the navigation keeps the current page open until you select a destination. Back from Movies or Series focuses its tab while keeping your place; a second Back returns to Live TV. Select a category shortcut to jump straight to its titles; returning from details restores your place. Settings includes **onn 4K remote**. Other remotes can also use Menu to focus navigation.
+The main controls match the onn 4K remote: the directional pad, center OK, Back, and Channel +/−. Use Left / Right in the top navigation, then OK to open Live TV, Movies, Series, Multi View, Streaming, Search, or Settings. Moving across the navigation keeps the current page open until you select a destination. Back from Movies or Series focuses its tab while keeping your place; a second Back returns to Live TV. Select a category shortcut to jump straight to its titles; returning from details restores your place. Settings includes **onn 4K remote**. Other remotes can also use Menu to focus navigation.
 
 Browsing the guide never changes the channel playing in the preview. The selected row updates the program description while the preview identifies the channel you are watching. Choose Watch or press OK on a current program to change channels. Select the preview to return to the channel already playing, even when browsing a different category or Favorites.
 
-Guide categories begin with All Channels, Favorites, and Most Watched when available. US Sports, USA Premium, US News, US Movies, US Entertainment, and US Documentaries follow in that order, before Local news and the remaining provider groups.
+Guide categories begin with All Channels, Favorites, and Most Watched. Most Watched ranks successfully opened live channels for each playlist, with recent viewing breaking ties. Browsing, retries and audio changes do not count as additional watches. Provider picks fill this shortcut until personal history is available. US Sports, USA Premium, US News, US Movies, US Entertainment, and US Documentaries follow in that order, before Local news and the remaining provider groups.
 
 | Where | Key | Does |
 |---|---|---|
@@ -54,12 +54,25 @@ Guide categories begin with All Channels, Favorites, and Most Watched when avail
 | Movies / episodes | Left / Right | Seek 10s (hold to go faster) |
 | Movies / episodes | OK | Play / pause |
 | Movies / episodes | Down | Audio, subtitles, next episode |
+| Multi View | OK on a video | Listen to that channel |
+| Multi View | Channel +/- | Change the focused channel |
+| Multi View | Back | Stop both channels and return to Live TV |
+
+## Two-channel Multi View
+
+Open **Multi View**, choose two different channels, then select **Watch both**. The picker offers search, Favorites, Most Watched and suggested sports. Browsing the picker never tunes a channel. During playback, choosing a replacement changes only that slot. Select **Side by side** or **Picture in Picture** to change the layout without reopening either stream. Press OK on a video or use the Audio button to choose the one audible channel. Save Favorites with the picker star or Hold OK.
+
+Multi View uses at most two concurrent live streams. It stops the ordinary guide/full-screen stream before starting. Leaving the page, changing playlists or putting the app in the background closes both connections; returning from the background restores the selected pair. A failed channel can be retried or replaced independently. Picture quality is capped at 1080p per slot to suit TV hardware. Two streams must be available within your provider account limit, including any playback on other devices.
 
 ## Picture-in-Picture
 
 Select **Picture-in-Picture** in the full-screen player's actions to keep the video playing in Android's native floating window. Supported devices also enter PiP when you press Home during full-screen playback. The guide preview does not enter PiP. The native window provides play/pause and Android's expand/close controls; reopening Tuner restores the full-screen player and its controls. PiP requires device support and Android's per-app permission. Video keeps playing in PiP, including the embedded torrent player; closing the window stops or pauses playback according to the normal live/VOD background behavior.
 
 ## Guide data
+
+Tuner saves the finished channel lineup, movie and series libraries, provider Most Watched, and current guide in private storage. Reopening restores these directly, skipping repeated provider parsing, country filtering and duplicate cleanup. Fresh channel snapshots last two hours, provider Most Watched twenty minutes, and movie/series snapshots twelve hours. Older saved libraries remain usable during a background refresh. Current and upcoming guide listings restore first while the full three-day guide loads separately.
+
+Snapshots belong to the exact provider account and relevant format/market settings, and damaged snapshots are ignored. First setup or an edited provider still requires an initial download and preparation. Refresh preserves usable content; Clear cache removes both raw downloads and prepared snapshots.
 
 1. Your provider's XMLTV guide (or the EPG URL you set).
 2. Free regional guides from epgshare01.online for any channel still missing listings, matched by channel name. Pick regions in Settings > Guide. Defaults: US national and US sports.
@@ -81,7 +94,7 @@ Every channel shows a logo. Tuner tries the provider's logo, then the guide's ic
 
 ## Settings
 
-Themes (Midnight, Carbon, Ocean, Ember, Cable Blue, Daylight), multiple playlists, live format (TS or HLS), guide preview on/off, free guide regions, local stations, onn remote help, refresh, clear cache.
+Themes (True Black, Midnight, Carbon, Ocean, Ember, Cable Blue, Daylight), multiple playlists, live format (TS or HLS), guide preview on/off, free guide regions, local stations, onn remote help, refresh, clear cache. In the theme picker, arrows preview a theme, OK saves it, and Back cancels the preview.
 
 ## Build
 

@@ -71,6 +71,12 @@ object Themes {
         text = Color(0xFFF1F5FC), dim = Color(0xFFAAB8CE), faint = Color(0xFF7D8EA8),
         accent = Color(0xFF70B4FF), focus = Color.White, onFocus = Color(0xFF080E1A),
     )
+    val Black = AppTheme(
+        "black", "True Black", bg = Color.Black, surface = Color(0xFF090909), surface2 = Color(0xFF17191D),
+        cell = Color(0xFF101113), cellNow = Color(0xFF172435), line = Color(0xFF343C49),
+        text = Color(0xFFF4F7FC), dim = Color(0xFFB3BECE), faint = Color(0xFF8998AD),
+        accent = Color(0xFF63ABFF), focus = Color(0xFF92C5FF), onFocus = Color(0xFF04080E),
+    )
     val Carbon = AppTheme(
         "carbon", "Carbon", bg = Color(0xFF0B0B0C), surface = Color(0xFF161618), surface2 = Color(0xFF202023),
         cell = Color(0xFF19191B), cellNow = Color(0xFF242427), line = Color(0xFF2E2E33),
@@ -101,7 +107,7 @@ object Themes {
         text = Color(0xFF111722), dim = Color(0xFF5B6575), faint = Color(0xFF8A93A1),
         accent = Color(0xFF1F6FEB), focus = Color(0xFF111722), onFocus = Color.White, dark = false,
     )
-    val all = listOf(Midnight, Carbon, Ocean, Ember, Royal, Daylight)
+    val all = listOf(Midnight, Black, Carbon, Ocean, Ember, Royal, Daylight)
     fun byId(id: String?) = all.firstOrNull { it.id == id } ?: Midnight
 }
 

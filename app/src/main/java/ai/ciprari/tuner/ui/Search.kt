@@ -37,6 +37,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -115,12 +116,23 @@ fun SearchScreen(state: AppState) {
             }
         }
         val requester = target?.let(requesters::get)
+        suspend fun restoreIfPending(requester: FocusRequester, expectedKey: String?): Boolean {
+            repeat(12) {
+                withFrameNanos { }
+                // A result can gain focus while the field or lazy row waits to attach. That
+                // newer selection owns focus, including the interval between OK down and up.
+                if (!state.restoreFocus || state.searchFocusedKey != expectedKey ||
+                    state.searchQuery.trim() != normalized || Repo.prefs.activeId.value != sourceId) return false
+                if (runCatching { requester.requestFocus() }.isSuccess) return true
+            }
+            return false
+        }
         if (requester != null && targetIndex != null) {
             if (searchList.layoutInfo.visibleItemsInfo.none { it.index == targetIndex }) searchList.scrollToItem(targetIndex!!)
-            if (requestAttachedFocus(requester)) state.restoreFocus = false
+            if (restoreIfPending(requester, target)) state.restoreFocus = false
         } else {
             state.searchFocusedKey = null
-            if (requestAttachedFocus(fieldFocus)) state.restoreFocus = false
+            if (restoreIfPending(fieldFocus, null)) state.restoreFocus = false
         }
     }
 
@@ -232,7 +244,13 @@ fun SearchScreen(state: AppState) {
                         HitRow(
                             h, requesters.getValue(h.key), h.channel?.let { requesters.getValue(favoriteFocusKey(h)) },
                             favorite = h.channel?.key in favorites,
-                            onFocus = { key, focused -> resultsFocused = focused; if (focused) state.searchFocusedKey = key },
+                            onFocus = { key, focused ->
+                                resultsFocused = focused
+                                if (focused) {
+                                    state.searchFocusedKey = key
+                                    state.restoreFocus = false
+                                }
+                            },
                             onOpen = { state.searchFocusedKey = h.key; h.open() },
                             onFavorite = { favoriteButton ->
                                 val c = h.channel

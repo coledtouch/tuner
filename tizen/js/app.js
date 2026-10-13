@@ -333,7 +333,7 @@
         store.settings.source ? "Refresh playlist" : "Add playlist",
         "empty-action",
         function () {
-          if (store.settings.source) connect();
+          if (store.settings.source) connect(true);
           else openTab(4);
         }
       )
@@ -1422,7 +1422,7 @@
     save.type = "submit";
     save.onclick = null;
     actions.appendChild(save);
-    actions.appendChild(button("Refresh", "refresh-source", connect));
+    actions.appendChild(button("Refresh", "refresh-source", function () { connect(true); }));
     form.appendChild(actions);
     form.onsubmit = function (e) {
       e.preventDefault();
@@ -1485,7 +1485,7 @@
       button("About Tuner", "about-tuner", function () {
         showDialog(
           "Tuner for Samsung TV",
-          "Version 1.4.0 · Samsung TV\nLive TV, guide, movies, series and Favorites. Two-channel PiP works on supported TVs and playlists. Embedded torrent playback is not available on Samsung.",
+          "Version 1.4.1 · Samsung TV\nLive TV, guide, movies, series and Favorites. Two-channel PiP works on supported TVs and playlists. Embedded torrent playback is not available on Samsung.",
           []
         );
       })
@@ -1525,8 +1525,9 @@
     openTab(0);
     toast("Playlist saved. Loading your channels.");
   }
-  function connect() {
+  function connect(force) {
     if (!store.settings.source) return;
+    var sameCatalog = client && client.catalogIdentity === D.catalogIdentity(store.settings.source, { zip: store.settings.zip });
     stopDual();
     player.stop();
     S.watched = null;
@@ -1539,8 +1540,10 @@
     dualChannels = [null, null];
     currentPlayItem = null;
     S.status = {};
-    S.catalogs = { live: [], movies: [], series: [] };
-    S.cats = { live: [], movies: [], series: [] };
+    if (!sameCatalog) {
+      S.catalogs = { live: [], movies: [], series: [] };
+      S.cats = { live: [], movies: [], series: [] };
+    }
     S.guide = {};
     S.guidesPending = {};
     S.guideChecked = {};
@@ -1574,7 +1577,7 @@
           render();
       },
     });
-    client.load();
+    client.load(force === true);
   }
   function back() {
     if (S.dialog) {
