@@ -5,7 +5,8 @@ import java.util.Locale
 /** Live TV stays in the USA lineup. Movies, series and audio have no language restrictions. */
 object ContentPolicy {
     data class Catalogue<T>(val items: List<T>, val categories: List<Category>)
-    private data class Labels(val us: Boolean, val foreign: Boolean, val english: Boolean, val otherLanguage: Boolean)
+    private data class Labels(val us: Boolean, val foreign: Boolean)
+    private val noLabels = Labels(us = false, foreign = false)
 
     private val countryAliases = buildMap {
         Locale.getISOCountries().forEach { code ->
@@ -30,7 +31,6 @@ object ContentPolicy {
         "(?<![a-z0-9])(?:" + countryAliases.keys.sortedByDescending { it.length }.joinToString("|") { Regex.escape(it) } + ")(?![a-z0-9])",
         RegexOption.IGNORE_CASE,
     )
-    private val englishLabel = Regex("(?<![a-z])(?:english|anglophone|eng|en)(?![a-z])", RegexOption.IGNORE_CASE)
     private val otherLanguageLabel = Regex(
         "(?<![a-z])(?:spanish|espa[nñ]ol|espanol|latino|latina|latam|latin|es|spa|french|fran[cç]ais|fr|fra|german|deutsch|de|deu|italian|italiano|it|ita|portuguese|portugu[eê]s|pt|por|arabic|ar|ara|hindi|hin|urdu|punjabi|bengali|tamil|telugu|malayalam|kannada|marathi|russian|rus|ru|polish|polski|pl|turkish|t[uü]rk[cç]e|tr|dutch|nederlands|nl|chinese|mandarin|cantonese|zh|japanese|ja|korean|ko|vietnamese|thai|indonesian|malay|filipino|tagalog|greek|hebrew|persian|farsi|ukrainian|romanian|hungarian|czech|slovak|serbian|croatian|bulgarian|swedish|norwegian|danish|finnish|multilingual|asian|taiwanese)(?![a-z])",
         RegexOption.IGNORE_CASE,
@@ -42,7 +42,8 @@ object ContentPolicy {
     private val englishMetadata = Regex("^(?:en|eng)(?:[-_][a-z0-9]{2,8})+$")
     private val englishAliases = setOf("english", "eng", "en")
     private val ambiguousCountryCodes = setOf("IN", "TO", "AS", "AT", "BE", "IS", "IT", "NO", "DO", "ME", "SO", "BY", "FI")
-    private val markerSeparators = Regex("[\\s/+|,;]+")
+    private val markerSeparators = Regex("[/+|,;]+")
+    private val markerWhitespace = Regex("\\s+")
 
     private fun countryLabel(match: MatchResult, value: String): String? {
         val code = countryAliases[match.value.lowercase(Locale.ROOT)] ?: return null
@@ -55,28 +56,70 @@ object ContentPolicy {
 
     private fun labels(value: String): Labels {
         val countries = countryLabels.findAll(value).mapNotNull { countryLabel(it, value) }.toList()
-        return Labels("US" in countries || usLeagues.containsMatchIn(value), countries.any { it != "US" }, englishLabel.containsMatchIn(value), otherLanguageLabel.containsMatchIn(value))
+        return Labels("US" in countries || usLeagues.containsMatchIn(value), countries.any { it != "US" })
     }
 
-    /** Only marked item labels are evidence; a film's ordinary title cannot establish its language. */
+    /** Resolve marked regions directly; ordinary title words never establish a region. */
     private fun nameLabels(name: String): Labels {
-        val marked = itemLabels.findAll(name).map { match -> match.groupValues.drop(1).first { it.isNotEmpty() } }.toMutableList()
-        itemPrefix.find(name)?.groupValues?.drop(1)?.firstOrNull { it.isNotEmpty() }?.let { marked += it }
-        val recognized = marked.mapNotNull { value ->
-            val clean = value.trim().lowercase(Locale.ROOT)
-            if (clean in countryAliases) countryAliases[clean]
-            else if (isEnglish(clean)) "English"
-            else if (otherLanguageLabel.matches(clean)) value
-            else {
-                val tokens = clean.split(markerSeparators).filter { it.isNotEmpty() }
-                // "(PLUTO Denmark)": the service name is not evidence, the country after it is.
-                val labelled = if (tokens.size > 1 && tokens.first() in services) tokens.drop(1) else tokens
-                if (labelled.isNotEmpty() && labelled.all { it in countryAliases || isEnglish(it) || otherLanguageLabel.matches(it) })
-                    labelled.joinToString(" | ") { countryAliases[it] ?: if (isEnglish(it)) "English" else it }
-                else null
+        var us = false
+        var foreign = false
+        fun include(value: String) {
+            var clean = value.trim().lowercase(Locale.ROOT)
+            // Remove the service before checking a whole country phrase such as United Kingdom.
+            val serviceEnd = clean.indexOfFirst { it.isWhitespace() || it in "/+|,;" }
+            if (serviceEnd > 0 && clean.substring(0, serviceEnd) in services)
+                clean = clean.substring(serviceEnd).trim()
+            val country = countryAliases[clean]
+            if (country != null) {
+                if (country == "US") us = true else foreign = true
+                return
             }
+            if (isEnglish(clean) || otherLanguageLabel.matches(clean)) return
+
+            // Explicit separators retain country names as phrases. Whitespace-only compounds
+            // use bounded longest-alias lookup, rather than scanning every country alias.
+            val parts = clean.split(markerSeparators).map { it.trim() }.filter { it.isNotEmpty() }
+            var markedUs = false
+            var markedForeign = false
+            for (part in parts) {
+                val wholeCountry = countryAliases[part]
+                if (wholeCountry != null) {
+                    if (wholeCountry == "US") markedUs = true else markedForeign = true
+                    continue
+                }
+                if (isEnglish(part) || otherLanguageLabel.matches(part)) continue
+                val words = part.split(markerWhitespace)
+                var index = 0
+                while (index < words.size) {
+                    var matched = false
+                    for (length in minOf(4, words.size - index) downTo 1) {
+                        val phrase = if (length == 1) words[index] else words.subList(index, index + length).joinToString(" ")
+                        val code = countryAliases[phrase]
+                        if (code != null || (length == 1 && (isEnglish(phrase) || otherLanguageLabel.matches(phrase)))) {
+                            if (code == "US") markedUs = true else if (code != null) markedForeign = true
+                            index += length
+                            matched = true
+                            break
+                        }
+                    }
+                    // Commit no country evidence from an incomplete marker or ordinary title.
+                    if (!matched) return
+                }
+            }
+            us = us || markedUs
+            foreign = foreign || markedForeign
         }
-        return labels(recognized.joinToString(" | "))
+
+        itemLabels.findAll(name).forEach { match ->
+            val value = match.groups[1]?.value ?: match.groups[2]?.value ?: match.groups[3]?.value
+            if (value != null) include(value)
+        }
+        itemPrefix.find(name)?.let { match ->
+            val value = match.groups[1]?.value ?: match.groups[2]?.value
+            if (value != null) include(value)
+        }
+        // No large country-alias regex, normalized label string, or language scan per channel.
+        return if (!us && !foreign) noLabels else Labels(us, foreign)
     }
 
     private fun metadataParts(value: String?) = value?.split(metadataSeparators)?.map { it.trim().lowercase(Locale.ROOT) }?.filter { it.isNotBlank() }.orEmpty()

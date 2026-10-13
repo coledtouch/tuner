@@ -1,6 +1,6 @@
 # Tuner
 
-IPTV player for Android TV and Google TV. Cable-style Live TV guide, live preview, movies, series, search, and themes. Version 1.3.1 improves navigation, playback recovery and Favorites, with unrestricted audio and an integrated Streaming tab.
+IPTV player for Android TV and Google TV. Cable-style Live TV guide, live preview, movies, series, search, and themes. Version 1.4.0 separates guide browsing from channel changes, adds native Picture-in-Picture, and improves navigation and Favorites, with unrestricted audio and an integrated Streaming tab.
 
 ## Install on Google TV
 
@@ -11,7 +11,7 @@ IPTV player for Android TV and Google TV. Cable-style Live TV guide, live previe
 
 ```powershell
 adb connect 192.168.1.50:5555
-adb install -r .\Tuner-1.3.1.apk
+adb install -r .\Tuner-1.4.0.apk
 ```
 
 Accept the debugging prompt on the TV the first time. Tuner shows up in your Apps row.
@@ -26,7 +26,11 @@ If you only have a link like `http://host:port/get.php?username=...&password=...
 
 ## Remote controls
 
-Use Left / Right in the top navigation, then OK to open Live TV, Movies, Series, Search, or Settings. Moving across the navigation keeps the current page open until you select a destination. In Movies and Series, select a category shortcut to jump straight to its titles; returning from details restores your place.
+The main controls match the onn 4K remote: the directional pad, center OK, Back, and Channel +/−. Use Left / Right in the top navigation, then OK to open Live TV, Movies, Series, Streaming, Search, or Settings. Moving across the navigation keeps the current page open until you select a destination. Back from Movies or Series focuses its tab while keeping your place; a second Back returns to Live TV. Select a category shortcut to jump straight to its titles; returning from details restores your place. Settings includes **onn 4K remote**. Other remotes can also use Menu to focus navigation.
+
+Browsing the guide never changes the channel playing in the preview. The selected row updates the program description while the preview identifies the channel you are watching. Choose Watch or press OK on a current program to change channels. Select the preview to return to the channel already playing, even when browsing a different category or Favorites.
+
+Guide categories begin with All Channels, Favorites, and Most Watched when available. US Sports, USA Premium, US News, US Movies, US Entertainment, and US Documentaries follow in that order, before Local news and the remaining provider groups.
 
 | Where | Key | Does |
 |---|---|---|
@@ -35,30 +39,39 @@ Use Left / Right in the top navigation, then OK to open Live TV, Movies, Series,
 | Guide | OK | Watch now, or show details for a future program |
 | Guide | Hold OK | Add or remove the channel from Favorites |
 | Guide | Channel +/- | Page up / down |
-| Guide | FF / Rewind | Jump the guide 2 hours |
-| Guide | Back | Return the grid to "now" |
-| Guide | 0-9 | Type a channel number |
+| Other remotes: Guide | FF / Rewind | Jump the guide 2 hours |
+| Guide | Back | Return a future selection to now; from now, focus the Live TV navigation tab |
+| Other remotes: Home | Menu | Focus the current navigation tab |
+| Other remotes: Guide | 0-9 | Type a channel number |
 | Live TV | Up / Down, Channel +/- | Change channel |
 | Live TV | OK | Info banner, press again for the channel list |
 | Live TV | Left | Channel list |
+| Live TV | Right | Focus player actions, including Favorites and Picture-in-Picture |
+| Live TV channel list | All / Favorites | Browse either lineup; only OK changes the channel |
 | Live TV | Back | Back to the guide (keeps playing in the preview window) |
 | Movies / episodes | Left / Right | Seek 10s (hold to go faster) |
 | Movies / episodes | OK | Play / pause |
 | Movies / episodes | Down | Audio, subtitles, next episode |
 
+## Picture-in-Picture
+
+Select **Picture-in-Picture** in the full-screen player's actions to keep the video playing in Android's native floating window. Supported devices also enter PiP when you press Home during full-screen playback. The guide preview does not enter PiP. The native window provides play/pause and Android's expand/close controls; reopening Tuner restores the full-screen player and its controls. PiP requires device support and Android's per-app permission. Video keeps playing in PiP, including the embedded torrent player; closing the window stops or pauses playback according to the normal live/VOD background behavior.
+
 ## Guide data
 
 1. Your provider's XMLTV guide (or the EPG URL you set).
-2. Free regional guides from epgshare01.online for any channel still missing listings, matched by channel name. Pick regions in Settings > Guide. Defaults: US national, US sports, Canada, UK.
+2. Free regional guides from epgshare01.online for any channel still missing listings, matched by channel name. Pick regions in Settings > Guide. Defaults: US national and US sports.
 3. Xtream's per-channel short EPG for anything left, fetched as rows scroll into view.
 
 ## Content and Favorites
 
 Live TV keeps U.S. channels using provider country labels, category labels, tagged names and U.S. EPG identifiers. Unknown or conflicting countries are hidden. Movies and Series show the complete provider library, including foreign and unlabelled titles. Audio language never blocks playback; English is preferred when available and other supported tracks remain selectable.
 
+Settings > Guide > **Local stations** optionally limits local affiliates to Boston, Worcester and New Hampshire while preserving national cable, sports, events and entertainment. The supported market uses ZIP 01608 for Worcester; blank means all U.S. local markets. Nearby news stations appear in the **Local news** guide category. Filtering uses station identifiers and regional news brands before duplicate folding, so an outside-market affiliate cannot become a local station's backup. Movies and Series are unaffected. This setting is stored privately on the device and survives app updates.
+
 Save channels with the guide Favorite button, Hold OK in the guide, a program's detail dialog, the Search result star, the full-screen player star or Hold OK, and the in-player channel list. The saved state updates immediately everywhere and persists separately for each playlist. Removing a Favorite preserves focus on a nearby channel in the Favorites list.
 
-Continue Watching requires the current movie URL to match the saved entry. Duplicate channel copies are folded into one entry with playback backups, retaining Favorites and guide data. Empty and out-of-window event slots are hidden. Channels that fail on every backup with a missing-channel response are hidden for three days; Settings can restore them immediately. Authentication, connection-limit and provider-outage responses do not hide channels. Reuploaded movies with matching titles and years are merged into their newest copy, keeping earlier uploads as playback alternatives.
+Continue Watching matches saved entries to the current movie or its playback backups and uses the current movie URL when reopening them. Duplicate channel copies are folded into one entry with playback backups, retaining Favorites and guide data. Empty and out-of-window event slots are hidden. Channels that fail on every backup with a missing-channel response are hidden for three days; Settings can restore them immediately. Authentication, connection-limit and provider-outage responses do not hide channels. Reuploaded movies with matching titles and years are merged into their newest copy, keeping earlier uploads as playback alternatives.
 
 ## Logos
 
@@ -66,11 +79,11 @@ Every channel shows a logo. Tuner tries the provider's logo, then the guide's ic
 
 ## Settings
 
-Themes (Midnight, Carbon, Ocean, Ember, Cable Blue, Daylight), multiple playlists, live format (TS or HLS), guide preview on/off, free guide regions, refresh, clear cache.
+Themes (Midnight, Carbon, Ocean, Ember, Cable Blue, Daylight), multiple playlists, live format (TS or HLS), guide preview on/off, free guide regions, local stations, onn remote help, refresh, clear cache.
 
 ## Build
 
-The **Streaming** tab, Settings > Torrentio, and the add-playlist screen all open the same integrated player. Paste the configured manifest link copied from Torrentio once. It is encrypted with an Android Keystore key and persists across app restarts. Movies and series load automatically from Stremio's official Cinemeta catalog. Browse poster cards or search by title. Select a card to see its description, year, rating, runtime, genres and cast when available, then choose Play movie or an episode; IMDb IDs and manual stream choice are available under Advanced options but are not required.
+The **Streaming** tab, Settings > Torrentio, and the add-playlist screen all open the same integrated player. Paste the configured manifest link copied from Torrentio once. It is encrypted with an Android Keystore key and persists across app restarts. Movies and series discovery rows load automatically through JustWatch, with Cinemeta providing search, title details and episode metadata. Browse poster cards or search by title. Select a card to see its description, year, rating, runtime, genres and cast when available, then choose Play movie or an episode; IMDb IDs and manual stream choice are available under Advanced options but are not required.
 
 Tuner tries the addon's streams in configured order and automatically moves to the next candidate on playback failure, preserving the playback position. The configured sort, quality exclusions and size limits apply. Stream lookups are cached in memory for five minutes, and signed stream URLs are not written to Continue Watching. Returning from playback restores the selected title, episode, search and scroll position.
 
@@ -90,7 +103,7 @@ The shared release key is stored outside this source folder, at `../signing/tune
 
 The release certificate SHA-256 is `EC:6F:ED:26:F3:B6:88:C4:6A:CB:1A:55:2B:D0:B9:EE:8C:E8:C9:62:BA:B4:DB:74:51:DF:3F:35:A3:95:45:86`. Keep a private backup of the signing folder; all future release updates must use this key.
 
-The installed 1.0.2 uses the old debug certificate `63:1E:66:57:D0:2D:8B:E2:97:09:50:1D:E6:69:1A:1B:4C:4F:1D:C2:90:B2:B5:F2:8A:63:9C:4A:B3:0D:82:A5`. Android cannot install the new release key over that version. A one-time migration/reinstall is needed; removing 1.0.2 clears its locally saved playlists and settings. After moving to the release-signed version, builds on both machines update it normally.
+Older 1.0.2 installations use the old debug certificate `63:1E:66:57:D0:2D:8B:E2:97:09:50:1D:E6:69:1A:1B:4C:4F:1D:C2:90:B2:B5:F2:8A:63:9C:4A:B3:0D:82:A5`. Android cannot install the new release key over that version. A one-time migration/reinstall is needed; removing 1.0.2 clears its locally saved playlists and settings. After moving to the release-signed version, builds on both machines update it normally.
 
 Tests (parsers, content policy, name matching, remote navigation, and Robolectric screenshots written to `app\build\screens`):
 

@@ -1,5 +1,6 @@
 package ai.ciprari.tuner
 
+import android.view.KeyEvent as AndroidKeyEvent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -20,6 +21,10 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.isFocused
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
@@ -34,6 +39,7 @@ import ai.ciprari.tuner.data.Program
 import ai.ciprari.tuner.data.Repo
 import ai.ciprari.tuner.data.Source
 import ai.ciprari.tuner.data.SourceType
+import ai.ciprari.tuner.player.PlayerHolder
 import ai.ciprari.tuner.ui.AppState
 import ai.ciprari.tuner.ui.CAT_FAV
 import ai.ciprari.tuner.ui.HomeScreen
@@ -43,6 +49,8 @@ import ai.ciprari.tuner.ui.Tab
 import ai.ciprari.tuner.ui.Themes
 import ai.ciprari.tuner.ui.Toasts
 import ai.ciprari.tuner.ui.TunerTheme
+import ai.ciprari.tuner.ui.floor30
+import ai.ciprari.tuner.ui.isBrowsingFuture
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -53,6 +61,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
+import org.robolectric.util.ReflectionHelpers
 
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -121,16 +130,30 @@ class GuideSearchFlowTest {
     private fun movieTag(index: Int) = "search-hit:$source:movie:flow-m:$index"
     private fun channelTag(index: Int) = "search-hit:$source:channel:flow:$index"
 
+    private fun awaitSearchResult(tag: String, focused: Boolean = false) {
+        // Advancing Compose's virtual clock does not wait for Dispatchers.Default. Poll on
+        // real time while delivering snapshots, posted Main work and the next Compose frame.
+        rule.waitUntil(timeoutMillis = 5_000) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            rule.runOnIdle { Snapshot.sendApplyNotifications() }
+            rule.mainClock.advanceTimeByFrame()
+            val matcher = if (focused) hasTestTag(tag) and isFocused() else hasTestTag(tag)
+            rule.onAllNodes(matcher).fetchSemanticsNodes().size == 1
+        }
+    }
+
     @Test fun searchReturnRestoresTheSelectedResultAndQuery() {
         val state = AppState().apply { tab = Tab.SEARCH; searchQuery = "Movie" }
         rule.setContent { Fixture(state) }
         settle()
+        awaitSearchResult(movieTag(1))
         rule.onNodeWithTag(movieTag(1)).performSemanticsAction(SemanticsActions.RequestFocus) { it() }
         rule.onNodeWithTag(movieTag(1)).assertIsFocused()
         rule.onRoot().performKeyInput { pressKey(Key.Enter) }
         settle(300)
         rule.runOnIdle { assertEquals("flow-m:1", (state.top as Screen.MovieDetail).movie.id); state.pop() }
         settle()
+        awaitSearchResult(movieTag(1), focused = true)
         rule.onNodeWithTag(movieTag(1)).assertIsFocused()
         rule.runOnIdle { assertEquals("Movie", state.searchQuery); assertFalse(state.restoreFocus) }
     }
@@ -139,6 +162,7 @@ class GuideSearchFlowTest {
         val state = AppState().apply { tab = Tab.SEARCH; searchQuery = "100" }
         rule.setContent { Fixture(state) }
         settle()
+        awaitSearchResult(channelTag(0))
         rule.onNodeWithTag(channelTag(0)).performSemanticsAction(SemanticsActions.RequestFocus) { it() }
         rule.onRoot().performKeyInput { pressKey(Key.DirectionRight) }
         rule.onNodeWithContentDescription("Add News Channel 0 to Favorites").assertIsFocused()
@@ -155,6 +179,7 @@ class GuideSearchFlowTest {
         val state = AppState().apply { tab = Tab.SEARCH; searchQuery = "100" }
         rule.setContent { Fixture(state) }
         settle()
+        awaitSearchResult(channelTag(0))
         rule.onNodeWithTag(channelTag(0)).performSemanticsAction(SemanticsActions.RequestFocus) { it() }
         rule.onNodeWithTag(channelTag(0)).performSemanticsAction(SemanticsActions.OnLongClick) { it() }
         settle(200)
@@ -168,6 +193,7 @@ class GuideSearchFlowTest {
         val state = AppState().apply { tab = Tab.SEARCH; searchQuery = "Featured" }
         rule.setContent { Fixture(state) }
         settle()
+        awaitSearchResult("search-hit:$source:channel:event:1")
         rule.onNodeWithTag("search-hit:$source:channel:event:1").performClick()
         settle(200)
         rule.runOnIdle {
@@ -185,6 +211,7 @@ class GuideSearchFlowTest {
         val state = AppState().apply { tab = Tab.SEARCH; searchQuery = "001" }
         rule.setContent { Fixture(state) }
         settle()
+        awaitSearchResult(channelTag(1))
         rule.onNodeWithTag(channelTag(1)).assertExists()
         rule.onNodeWithTag(channelTag(1)).performClick()
         settle(200)
@@ -195,6 +222,7 @@ class GuideSearchFlowTest {
         val state = AppState().apply { tab = Tab.SEARCH; searchQuery = "100" }
         rule.setContent { Fixture(state) }
         settle()
+        awaitSearchResult(channelTag(0))
         rule.onNodeWithTag(channelTag(0)).performSemanticsAction(SemanticsActions.RequestFocus) { it() }
         val now = System.currentTimeMillis()
         rule.runOnIdle { Repo.putPrograms(mapOf(channels[0].key to listOf(Program(now - 60_000, now + 60_000, "Updated bulletin")))) }
@@ -205,9 +233,10 @@ class GuideSearchFlowTest {
         // Search computes off the UI thread. Wait for its result to reach a Compose frame,
         // rather than assuming that advancing the virtual clock also completes that worker.
         rule.waitUntil(timeoutMillis = 5_000) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
             rule.runOnIdle { Snapshot.sendApplyNotifications() }
             rule.mainClock.advanceTimeByFrame()
-            rule.onAllNodesWithText("Channel 100  ·  Updated bulletin").fetchSemanticsNodes().isNotEmpty()
+            rule.onAllNodesWithText("Channel 100  ·  Updated bulletin").fetchSemanticsNodes().size == 1
         }
         rule.onNodeWithText("Channel 100  ·  Updated bulletin").assertExists()
     }
@@ -216,6 +245,7 @@ class GuideSearchFlowTest {
         val state = AppState().apply { tab = Tab.SEARCH; searchQuery = "Movie" }
         rule.setContent { Fixture(state) }
         settle()
+        awaitSearchResult(movieTag(1))
         rule.onNodeWithTag(movieTag(1)).performSemanticsAction(SemanticsActions.RequestFocus) { it() }
         settle(100)
         rule.runOnIdle { rule.activity.onBackPressedDispatcher.onBackPressed() }
@@ -255,6 +285,71 @@ class GuideSearchFlowTest {
         rule.runOnIdle { assertEquals(7, state.guide.row); assertEquals(channels[7].key, state.guide.selectedChannelKey); assertEquals(null, state.guide.pendingChannelKey) }
     }
 
+    @Test fun browsingGuideKeepsTheWatchedStreamAndPreviewOpensThatChannel() {
+        val watched = channels[0].copy(backups = listOf("http://example.invalid/live/watched-backup.ts"))
+        Repo.channels.value = listOf(watched) + channels.drop(1)
+        Repo.prefs.lastChannelKey = watched.key
+        channels.slice(2..3).forEach { Repo.prefs.toggleFavorite(it.key) }
+        // Keep video rendering off in this local fixture; the session tests also cover preview on.
+        ReflectionHelpers.setStaticField(PlayerHolder::class.java, "currentUrl", watched.backups[0])
+        ReflectionHelpers.setStaticField(PlayerHolder::class.java, "isLive", true)
+        try {
+            val state = AppState().apply { guide.initialized = true; guide.category = CAT_FAV }
+            rule.setContent { Fixture(state) }
+            settle()
+            rule.onNodeWithText("Watching  ${watched.number}  ${watched.name}").assertExists()
+            rule.onRoot().performKeyInput { pressKey(Key.DirectionDown); pressKey(Key.DirectionRight) }
+            settle(1_600)
+            rule.onNode(hasText("Next bulletin") and hasAnyAncestor(hasTestTag("guide-program-info"))).assertExists()
+            rule.onNodeWithText("Watching  ${watched.number}  ${watched.name}").assertExists()
+            rule.runOnIdle {
+                assertEquals(channels[3].key, state.guide.selectedChannelKey)
+                assertEquals(watched.backups[0], PlayerHolder.currentUrl)
+                assertEquals(watched.key, Repo.prefs.lastChannelKey)
+                assertEquals(Screen.Home, state.top)
+            }
+            rule.onNodeWithTag("guide-preview").performClick()
+            settle(300)
+            rule.runOnIdle {
+                val request = (state.top as Screen.Player).request as PlayRequest.Live
+                assertEquals(watched.key, request.channel.key)
+                assertTrue(request.lineup.any { it.key == watched.key })
+                assertEquals(watched.backups[0], PlayerHolder.currentUrl)
+            }
+        } finally {
+            ReflectionHelpers.setStaticField(PlayerHolder::class.java, "currentUrl", null)
+            ReflectionHelpers.setStaticField(PlayerHolder::class.java, "isLive", false)
+        }
+    }
+
+    @Test fun backAfterReturningToTheCurrentHalfHourRequestsNavigation() {
+        val state = AppState().apply {
+            guide.initialized = true
+            guide.row = 6
+            guide.windowStart = floor30(System.currentTimeMillis()) + 2 * 3600_000L
+            guide.focusTime = guide.windowStart
+        }
+        rule.setContent { Fixture(state) }
+        settle()
+        rule.runOnIdle { rule.activity.onBackPressedDispatcher.onBackPressed() }
+        settle(200)
+        rule.onNodeWithTag("guide-grid").assertIsFocused()
+        var navigationRequestsBefore = 0
+        rule.runOnIdle {
+            assertFalse(state.guide.isBrowsingFuture(System.currentTimeMillis()))
+            // Current-program selection can use an absolute timestamp rather than the 0 sentinel.
+            state.guide.focusTime = System.currentTimeMillis()
+            navigationRequestsBefore = state.navigationRequest
+        }
+        settle(100)
+        rule.runOnIdle { rule.activity.onBackPressedDispatcher.onBackPressed() }
+        settle(300)
+        rule.runOnIdle {
+            assertEquals(6, state.guide.row)
+            assertEquals(navigationRequestsBefore + 1, state.navigationRequest)
+        }
+    }
+
     @Test fun futureProgramDetailsCanSaveAChannelWithoutTuningIt() {
         val state = AppState().apply { guide.initialized = true }
         rule.setContent { Fixture(state) }
@@ -267,6 +362,34 @@ class GuideSearchFlowTest {
         rule.runOnIdle { assertTrue(channels[0].key in Repo.prefs.favorites.value); assertEquals(Screen.Home, state.top) }
         rule.onNodeWithText("Close").performClick()
         settle(300)
+        rule.onNodeWithTag("guide-grid").assertIsFocused()
+    }
+
+    @Test fun aShortOkWithZeroNativeDownTimeOpensFutureDetailsInsteadOfFavoriting() {
+        val state = AppState().apply { guide.initialized = true }
+        rule.setContent { Fixture(state) }
+        settle()
+        rule.onRoot().performKeyInput { pressKey(Key.DirectionRight) }
+        settle(100)
+        rule.runOnIdle {
+            rule.activity.dispatchKeyEvent(AndroidKeyEvent(0L, 10_000L, AndroidKeyEvent.ACTION_DOWN, AndroidKeyEvent.KEYCODE_DPAD_CENTER, 0))
+            rule.activity.dispatchKeyEvent(AndroidKeyEvent(0L, 10_050L, AndroidKeyEvent.ACTION_UP, AndroidKeyEvent.KEYCODE_DPAD_CENTER, 0))
+        }
+        settle(300)
+        rule.onNodeWithText("Watch channel now").assertExists()
+        rule.runOnIdle { assertFalse(channels[0].key in Repo.prefs.favorites.value); assertEquals(Screen.Home, state.top) }
+    }
+
+    @Test fun holdingOkWithoutRepeatsAndWithZeroNativeDownTimeFavoritesWithoutTuning() {
+        val state = AppState().apply { guide.initialized = true }
+        rule.setContent { Fixture(state) }
+        settle()
+        rule.runOnIdle {
+            rule.activity.dispatchKeyEvent(AndroidKeyEvent(0L, 20_000L, AndroidKeyEvent.ACTION_DOWN, AndroidKeyEvent.KEYCODE_DPAD_CENTER, 0))
+            rule.activity.dispatchKeyEvent(AndroidKeyEvent(0L, 20_700L, AndroidKeyEvent.ACTION_UP, AndroidKeyEvent.KEYCODE_DPAD_CENTER, 0))
+        }
+        settle(200)
+        rule.runOnIdle { assertTrue(channels[0].key in Repo.prefs.favorites.value); assertEquals(Screen.Home, state.top) }
         rule.onNodeWithTag("guide-grid").assertIsFocused()
     }
 }

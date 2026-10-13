@@ -2,6 +2,7 @@ package ai.ciprari.tuner.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,9 +15,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
@@ -31,6 +34,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,20 +42,31 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.InputMode
+import androidx.compose.ui.platform.LocalInputModeManager
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import ai.ciprari.tuner.data.FreeEpg
 import ai.ciprari.tuner.data.LoadStatus
+import ai.ciprari.tuner.data.LocalLineup
 import ai.ciprari.tuner.data.Repo
 import ai.ciprari.tuner.data.Source
 import ai.ciprari.tuner.data.SourceType
 import ai.ciprari.tuner.player.PlayerHolder
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @Composable
 fun SettingsScreen(state: AppState) {
+    val windowFocused = LocalWindowInfo.current.isWindowFocused
     val sources by Repo.prefs.sources.collectAsState()
     val activeId by Repo.prefs.activeId.collectAsState()
     val channels by Repo.channels.collectAsState()
@@ -59,16 +74,29 @@ fun SettingsScreen(state: AppState) {
     val series by Repo.series.collectAsState()
     val favorites by Repo.prefs.favorites.collectAsState()
     val epgStatus by Repo.epgStatus.collectAsState()
+    val localZip by Repo.prefs.localZip.collectAsState()
     var sheetFor by remember { mutableStateOf<Source?>(null) }
     var confirmDelete by remember { mutableStateOf<Source?>(null) }
     var themeSheet by remember { mutableStateOf(false) }
     var regionSheet by remember { mutableStateOf(false) }
+    var remoteHelp by remember { mutableStateOf(false) }
+    var restoreRemoteHelp by remember { mutableStateOf(false) }
+    val remoteHelpFocus = remember { FocusRequester() }
+    var localMarketSheet by remember { mutableStateOf(false) }
+    var restoreLocalMarket by remember { mutableStateOf(false) }
+    val localMarketFocus = remember { FocusRequester() }
     // Settings values aren't flows; bump this to redraw after changing one.
     var rev by remember { mutableIntStateOf(0) }
     val first = remember { FocusRequester() }
 
-    LaunchedEffect(state.restoreFocus) {
-        if (state.restoreFocus && requestAttachedFocus(first)) state.restoreFocus = false
+    LaunchedEffect(state.restoreFocus, windowFocused) {
+        if (state.restoreFocus && windowFocused && requestAttachedFocus(first)) state.restoreFocus = false
+    }
+    LaunchedEffect(restoreRemoteHelp, windowFocused) {
+        if (restoreRemoteHelp && windowFocused && requestAttachedFocus(remoteHelpFocus)) restoreRemoteHelp = false
+    }
+    LaunchedEffect(restoreLocalMarket, windowFocused) {
+        if (restoreLocalMarket && windowFocused && requestAttachedFocus(localMarketFocus)) restoreLocalMarket = false
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -93,6 +121,12 @@ fun SettingsScreen(state: AppState) {
                 SettingRow("Add a playlist", "Xtream Codes login or M3U link", icon = true,
                     modifier = if (sources.isEmpty()) Modifier.focusRequester(first) else Modifier,
                     onClick = { state.push(Screen.EditSource(null)) })
+            }
+
+            header("Remote")
+            item(key = "remote-help") {
+                SettingRow("onn 4K remote", "Arrows, OK and Back: see all Tuner controls", modifier = Modifier.focusRequester(remoteHelpFocus),
+                    onClick = { remoteHelp = true })
             }
 
             header("Appearance")
@@ -141,6 +175,17 @@ fun SettingsScreen(state: AppState) {
             }
 
             header("Guide")
+            item(key = "local-market") {
+                val market = LocalLineup.marketForZip(localZip)
+                SettingRow(
+                    "Local stations",
+                    if (market == null) "All U.S. markets. Choose nearby stations for a shorter guide."
+                    else "${market.label} · ZIP $localZip. Cable, sports and entertainment stay available.",
+                    trailing = if (market == null) "All U.S." else "Nearby",
+                    modifier = Modifier.focusRequester(localMarketFocus),
+                    onClick = { localMarketSheet = true },
+                )
+            }
             item(key = "free$rev") {
                 val regions = Repo.prefs.freeEpgRegions
                 val names = FreeEpg.regions.filter { it.code in regions }.map { it.name }
@@ -180,6 +225,23 @@ fun SettingsScreen(state: AppState) {
             }
         }
 
+        if (remoteHelp) OnnRemoteHelp(onClose = { remoteHelp = false; restoreRemoteHelp = true })
+        if (localMarketSheet) ActionSheet(
+            title = "Local stations",
+            actions = listOf(
+                "Boston, Worcester + New Hampshire" to {
+                    Repo.prefs.setLocalZip(LocalLineup.WORCESTER_ZIP)
+                    Repo.load()
+                    Toasts.show("Nearby local stations selected. Cable and sports stay available.")
+                },
+                "All U.S. local stations" to {
+                    Repo.prefs.setLocalZip("")
+                    Repo.load()
+                    Toasts.show("All U.S. local markets selected")
+                },
+            ),
+            onClose = { localMarketSheet = false; restoreLocalMarket = true },
+        )
         if (themeSheet) ThemeSheet(onClose = { themeSheet = false; rev++; state.restoreFocus = true })
         if (regionSheet) RegionSheet(onClose = { changed ->
             regionSheet = false; rev++; state.restoreFocus = true
@@ -214,6 +276,71 @@ fun SettingsScreen(state: AppState) {
                 ),
                 onClose = { confirmDelete = null; state.restoreFocus = true },
             )
+        }
+    }
+}
+
+@Composable
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+private fun OnnRemoteHelp(onClose: () -> Unit) {
+    val done = remember { FocusRequester() }
+    val list = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    val controls = remember {
+        listOf(
+            "Arrows" to "Move through tabs, channels and titles.",
+            "OK / Enter" to "Open the selected item. While a movie or episode plays, pause or resume.",
+            "Back" to "Close details or player controls. From a library, return to the top tabs.",
+            "Channel + / −" to "Change channels while watching live TV.",
+            "Hold OK" to "While watching live TV, add or remove the channel from Favorites.",
+            "Down" to "While watching a movie or episode, open Audio and Subtitles.",
+            "Star shortcut" to "In Google TV remote settings, set the star button to launch Tuner.",
+            "Home" to "Return to Google TV. Volume and app shortcut buttons keep their usual functions.",
+        )
+    }
+    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        val windowFocused = LocalWindowInfo.current.isWindowFocused
+        val inputManager = LocalInputModeManager.current
+        val inputMode = inputManager.inputMode
+        LaunchedEffect(windowFocused) {
+            if (windowFocused) inputManager.requestInputMode(InputMode.Keyboard)
+        }
+        // A dialog owns a separate window. Request remote focus after that window gains focus,
+        // rather than from the underlying Settings composition before the dialog is ready.
+        LaunchedEffect(windowFocused, inputMode) {
+            if (windowFocused && inputMode == InputMode.Keyboard) requestAttachedFocus(done)
+        }
+        Box(Modifier.fillMaxSize().dimBackground(0.7f), contentAlignment = Alignment.Center) {
+            Column(
+                Modifier.widthIn(max = 620.dp).fillMaxWidth(0.9f).fillMaxHeight(0.86f)
+                    .clip(RoundedCornerShape(16.dp)).background(Palette.surface).padding(20.dp)
+                    .onPreviewKeyEvent { event ->
+                        if (event.type != KeyEventType.KeyDown) false
+                        else {
+                            val distance = when (event.nativeKeyEvent.keyCode) {
+                                android.view.KeyEvent.KEYCODE_DPAD_DOWN -> if (list.canScrollForward) 104f else 0f
+                                android.view.KeyEvent.KEYCODE_DPAD_UP -> if (list.canScrollBackward) -104f else 0f
+                                else -> 0f
+                            }
+                            if (distance == 0f) false else { scope.launch { list.scrollBy(distance) }; true }
+                        }
+                    },
+            ) {
+                Text("onn 4K remote", color = Palette.text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Text("Use the arrows and the center OK button.", color = Palette.dim, fontSize = 13.sp, modifier = Modifier.padding(top = 5.dp, bottom = 12.dp))
+                LazyColumn(state = list, modifier = Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(bottom = 12.dp)) {
+                    items(controls, key = { it.first }) { (key, action) ->
+                        Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                            Text(key, color = Palette.accent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(114.dp))
+                            Text(action, color = Palette.text.copy(alpha = 0.85f), fontSize = 13.sp, lineHeight = 18.sp, modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+                Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("↑ ↓ Read · OK or Back Close", color = Palette.dim, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                    PillButton("Done", onClose, Modifier.focusRequester(done), primary = true)
+                }
+            }
         }
     }
 }

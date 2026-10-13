@@ -54,6 +54,49 @@ class ContentPolicyTest {
         assertEquals(5, ContentPolicy.live(items, categories).items.size)
     }
 
+    @Test fun explicitForeignMarkersVetoUsEvenAfterAnotherMarkerOrLanguage() {
+        val names = listOf(
+            "[US] [IN] News", "[US / India] News", "(PLUTO US / IN) News",
+            "[English / IT] News", "[US] [Tuvalu] News", "[US] [ca] News",
+        )
+        assertTrue(ContentPolicy.live(names.map { channel(it, listOf("us")) }, categories).items.isEmpty())
+    }
+
+    @Test fun compoundAndServiceMarkersPreserveMultiwordForeignCountryVetoes() {
+        val names = listOf(
+            "(US / United Kingdom) News", "(PLUTO United Kingdom) News", "(PLUTO South Korea) News",
+            "[US South Korea] News", "[US English United Kingdom] News", "[US] (Plex New Zealand) News",
+            "USA / United Arab Emirates: News",
+        )
+        assertTrue(ContentPolicy.live(names.map { channel(it, listOf("us")) }, categories).items.isEmpty())
+    }
+
+    @Test fun compoundMultiwordUsAliasesAllowLanguagesButNotOrdinaryTitleWords() {
+        val names = listOf(
+            "(PLUTO United States) News", "(PLUTO English United States of America) News",
+            "[English United States Spanish] News", "[USA / United States of America] News",
+        )
+        assertEquals(names, ContentPolicy.live(names.map { channel(it) }, categories).items.map { it.name })
+        val ordinary = listOf("[Made in United States] News", "[US / ordinary title] News", "The Last of Us: Part One")
+        assertTrue(ContentPolicy.live(ordinary.map { channel(it) }, categories).items.isEmpty())
+    }
+
+    @Test fun markedServiceAndLanguageCombinationsPreserveUsEvidenceWithoutTitleGuessing() {
+        val names = listOf(
+            "(PLUTO USA / English) Local news", "[English] [United States] Local news",
+            "US / Spanish: Local news", "[US] News (English)",
+        )
+        assertEquals(names, ContentPolicy.live(names.map { channel(it) }, categories).items.map { it.name })
+        val ordinary = listOf("The Last of Us: Part One", "Made in USA: Documentary", "[USA Documentary] News")
+        assertTrue(ContentPolicy.live(ordinary.map { channel(it) }, categories).items.isEmpty())
+    }
+
+    @Test fun tvQualityWordsStayDistinctFromAnExplicitTuvaluMarker() {
+        val cats = listOf(Category("us", "Tubi TV (USA)"))
+        val result = ContentPolicy.live(listOf(channel("[TV] Local channel", listOf("us")), channel("[Tuvalu] Foreign channel", listOf("us"))), cats)
+        assertEquals(listOf("[TV] Local channel"), result.items.map { it.name })
+    }
+
     @Test fun countryAndEnglishMetadataAliasesAreSupported() {
         val countries = listOf("US", "USA", "United States", "United States of America", "U.S.A.")
         val items = countries.mapIndexed { index, country -> channel("Channel $index", country = country, language = listOf("en", "eng", "English", "en-US", "EN_gb")[index]) }

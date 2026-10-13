@@ -94,7 +94,7 @@ fun TorrentioScreen(
         fun exit() {
             if (configuring) { configuring = false; restoreFocus = true }
             else if (selected != null) backToCards()
-            else if (state.top == Screen.Home) { state.tab = Tab.GUIDE; state.restoreFocus = true }
+            else if (state.top == Screen.Home) state.requestNavigation()
             else state.pop()
         }
         fun openTitle(title: AddonTitle, episode: AddonEpisode? = null) {
@@ -250,8 +250,8 @@ fun TorrentioScreen(
                 Row(Modifier.fillMaxWidth().padding(horizontal = inset, vertical = if (compact) 8.dp else 12.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("Torrentio", color = Palette.text, fontSize = if (compact) 21.sp else 26.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                        if (viewportWidth >= 600.dp) Text("Movies and series, ready to discover", color = Palette.dim, fontSize = if (compact) 11.sp else 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("Discover", color = Palette.text, fontSize = if (compact) 21.sp else 26.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                        if (viewportWidth >= 600.dp) Text("Arrows Move · OK Select · Back ${if (configuring) "Close" else if (selected != null) "Cards" else if (state.top == Screen.Home) "Tabs" else "Return"}", color = Palette.dim, fontSize = if (compact) 11.sp else 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(if (compact) 6.dp else 10.dp)) {
                         fun chooseType(series: Boolean) {
@@ -263,7 +263,7 @@ fun TorrentioScreen(
                         }
                         PillButton("Movies", { chooseType(false) }, primary = !state.torrentioSeries)
                         PillButton("Series", { chooseType(true) }, primary = state.torrentioSeries)
-                        PillButton("Options", { configuring = !configuring; restoreFocus = true }, Modifier.focusRequester(requester("header:options")))
+                        PillButton("Setup", { configuring = !configuring; restoreFocus = true }, Modifier.focusRequester(requester("header:options")))
                         PillButton("Back", { exit() })
                     }
                 }

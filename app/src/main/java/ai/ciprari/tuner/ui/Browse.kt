@@ -171,6 +171,7 @@ fun BrowseScreen(
                 inset = inset,
                 compact = compact,
                 dense = dense,
+                remoteHint = if (shownHero.progress != null) "OK Resume · Back Tabs" else "OK Details · Back Tabs",
             )
             if (displayRows.size > 1) {
                 LazyRow(
@@ -301,7 +302,7 @@ private fun PosterCard(item: BrowseItem, modifier: Modifier, onFocused: () -> Un
 }
 
 @Composable
-private fun Hero(item: BrowseItem, label: String, height: Dp, inset: Dp, compact: Boolean, dense: Boolean) {
+private fun Hero(item: BrowseItem, label: String, height: Dp, inset: Dp, compact: Boolean, dense: Boolean, remoteHint: String) {
     // Debounce focus changes. The repository also caches movie details across visits.
     var info by remember(item.key, item.movie?.id) { mutableStateOf<ai.ciprari.tuner.data.MovieInfo?>(null) }
     LaunchedEffect(item.key, item.movie?.id) {
@@ -329,6 +330,8 @@ private fun Hero(item: BrowseItem, label: String, height: Dp, inset: Dp, compact
         }
         Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(0.25f to Palette.bg, 0.68f to Palette.bg.copy(alpha = 0.15f), 1f to Color.Transparent)))
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.45f to Color.Transparent, 1f to Palette.bg)))
+        Text(remoteHint, color = Palette.dim, fontSize = 10.sp, maxLines = 1,
+            modifier = Modifier.align(Alignment.TopEnd).padding(top = 9.dp, end = inset))
         Column(Modifier.fillMaxWidth(if (compact) 0.72f else 0.64f).padding(start = inset, top = 9.dp, end = 8.dp)) {
             Text(label, color = Palette.accent, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.8.sp)
             Text(

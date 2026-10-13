@@ -59,6 +59,24 @@ object PlayerHolder {
 
     /** Key of a live channel that just failed on every source. The player screen skips past it. */
     val unavailable = MutableStateFlow<String?>(null)
+    /** Full-screen playback alone can enter native PiP; guide previews never opt in. */
+    val fullscreenPlayback = MutableStateFlow(false)
+    val pipStateChanges = MutableStateFlow(0)
+    val pipSupported = MutableStateFlow(false)
+    val inPictureInPicture = MutableStateFlow(false)
+    val pipVideoOnly = MutableStateFlow(false)
+    val pipEligible: Boolean get() {
+        val p = exo ?: return false
+        return fullscreenPlayback.value && currentUrl != null && error.value == null &&
+            p.videoSize.width > 0 && p.videoSize.height > 0 && p.playbackState in setOf(Player.STATE_READY, Player.STATE_BUFFERING)
+    }
+
+    fun setFullscreenPlayback(fullscreen: Boolean) { fullscreenPlayback.value = fullscreen }
+    fun setPictureInPictureMode(enabled: Boolean) {
+        inPictureInPicture.value = enabled
+        pipVideoOnly.value = enabled
+    }
+    fun setPipTransition(entering: Boolean) { pipVideoOnly.value = entering || inPictureInPicture.value }
 
     // The current channel's sources: its main URL, then the copies folded into it ([ai.ciprari.tuner.data.Channel.backups]).
     private var sources: List<String> = emptyList()
@@ -111,6 +129,7 @@ object PlayerHolder {
         }
 
     private fun listener(p: ExoPlayer) = object : Player.Listener {
+        override fun onEvents(player: Player, events: Player.Events) { pipStateChanges.value++ }
         override fun onPlayerError(e: PlaybackException) {
             if (currentUrl == null) return
             val url = source ?: return
@@ -333,6 +352,7 @@ object PlayerHolder {
         bufferingBudget = null
         TorrentEngine.stop()
         main.removeCallbacksAndMessages(null)
+        exo?.playWhenReady = false
         exo?.stop()
         exo?.clearMediaItems()
         currentUrl = null
@@ -341,6 +361,9 @@ object PlayerHolder {
     }
 
     fun onAppBackground() {
+        // A native PiP activity is paused but remains visible. Closing its window clears this flag
+        // before the activity's normal background cleanup runs.
+        if (inPictureInPicture.value) return
         playbackIntent.background(exo?.playWhenReady == true && currentUrl != null)
         bufferingBudget = null
         TorrentEngine.pause()

@@ -61,7 +61,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
@@ -74,7 +73,6 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalInputModeManager
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -108,6 +106,50 @@ private const val HORIZON = 24 * HOUR       // how far ahead you can scroll
 internal const val LONG_PRESS_MS = 600L
 private val ROW_H = 52.dp
 
+/** Start from the event we receive; some remotes and test injectors supply a zero downTime. */
+internal class GuideOkPress {
+    private var startedAt: Long? = null
+
+    fun heldMs(eventTime: Long, repeatCount: Int, down: Boolean): Long {
+        if (down && (repeatCount == 0 || startedAt == null)) startedAt = eventTime
+        val held = startedAt?.let { (eventTime - it).coerceAtLeast(0) } ?: 0L
+        if (!down) reset()
+        return held
+    }
+
+    fun reset() { startedAt = null }
+}
+
+/** Browsing never tunes. A new guide session may resume only a known last-watched channel. */
+internal class GuidePreviewSession {
+    private var initialized = false
+    private var watched: Channel? = null
+
+    fun update(
+        channels: List<Channel>, trending: List<Channel>, previewOn: Boolean,
+        currentUrl: String?, isLive: Boolean, lastChannelKey: String?, start: (Channel) -> Unit,
+    ): Channel? {
+        if (currentUrl != null) {
+            initialized = true
+            fun matches(c: Channel) = currentUrl == c.url || currentUrl in c.backups
+            watched = if (isLive) channels.firstOrNull(::matches) ?: trending.firstOrNull(::matches)
+                ?: watched?.takeIf(::matches) else null
+            return watched
+        }
+        watched = null
+        if (previewOn && !initialized && lastChannelKey != null) {
+            val last = channels.firstOrNull { it.key == lastChannelKey }
+                ?: trending.firstOrNull { it.key == lastChannelKey }
+            if (last != null) {
+                initialized = true
+                watched = last
+                start(last)
+            }
+        }
+        return watched
+    }
+}
+
 fun floor30(t: Long) = t - t % SLOT
 
 /** Guide position that survives leaving the guide (detail pages, full-screen player). */
@@ -131,6 +173,9 @@ class GuideState {
 
     fun focusChannel(c: Channel) { pendingChannelKey = c.key; selectedChannelKey = c.key; focusTime = 0; windowStart = 0 }
 }
+
+/** A current airing may start after the half-hour boundary; that does not make it future. */
+internal fun GuideState.isBrowsingFuture(atTime: Long): Boolean = focusTime > atTime || windowStart > floor30(atTime)
 
 /** Per-channel timelines with gaps filled by hour-long placeholder blocks, cached per guide refresh. */
 private class Timelines {
@@ -178,14 +223,15 @@ fun GuideScreen(state: AppState) {
     val now = rememberNow(30_000)
     val minTime = floor30(now)
     val scope = rememberCoroutineScope()
-    val focusManager = LocalFocusManager.current
     val timelines = remember { Timelines() }
     val gridFocus = remember { FocusRequester() }
     var gridFocused by remember { mutableStateOf(false) }
     var digits by remember { mutableStateOf("") }
     var details by remember { mutableStateOf<Pair<Channel, Program>?>(null) }
     var longPressed by remember { mutableStateOf(false) }
-    var previewChannelKey by remember { mutableStateOf<String?>(null) }
+    val okPress = remember { GuideOkPress() }
+    val previewSession = remember { GuidePreviewSession() }
+    var watchedChannel by remember { mutableStateOf<Channel?>(null) }
     val base = remember { floor30(System.currentTimeMillis()) - 6 * HOUR }
 
     val lineup = remember(all, g.category, favorites, trending) {
@@ -239,25 +285,14 @@ fun GuideScreen(state: AppState) {
         if (state.restoreFocus && requestAttachedFocus(gridFocus)) state.restoreFocus = false
     }
 
-    // Live preview: start the focused channel once the highlight rests on it.
+    // Keep the watched channel on screen while selection and program information move independently.
     val previewOn = Repo.prefs.guidePreview
-    LaunchedEffect(focusedChannel?.key, gridFocused, previewOn) {
-        val c = focusedChannel
-        if (c == null) {
-            previewChannelKey = null
-            if (previewOn && PlayerHolder.isLive) PlayerHolder.stop()
-            return@LaunchedEffect
+    LaunchedEffect(all, trending, previewOn) {
+        watchedChannel = previewSession.update(
+            all, trending, previewOn, PlayerHolder.currentUrl, PlayerHolder.isLive, Repo.prefs.lastChannelKey,
+        ) { c ->
+            PlayerHolder.play(c.url, live = true, backups = c.backups, key = c.key)
         }
-        if (!previewOn || !gridFocused) return@LaunchedEffect
-        val currentUrl = PlayerHolder.currentUrl
-        if (PlayerHolder.isLive && PlayerHolder.error.value == null && (currentUrl == c.url || (currentUrl != null && currentUrl in c.backups))) {
-            previewChannelKey = c.key
-            return@LaunchedEffect
-        }
-        delay(650)
-        PlayerHolder.play(c.url, live = true, backups = c.backups, key = c.key)
-        previewChannelKey = c.key
-        Repo.prefs.lastChannelKey = c.key
     }
     DisposableEffect(Unit) {
         onDispose {
@@ -274,7 +309,7 @@ fun GuideScreen(state: AppState) {
         }
     }
 
-    // Number keys: type a channel number, it tunes after a short pause.
+    // Number keys jump to the channel after a short pause; OK starts watching it.
     LaunchedEffect(digits) {
         if (digits.isEmpty()) return@LaunchedEffect
         delay(1400)
@@ -287,7 +322,9 @@ fun GuideScreen(state: AppState) {
     fun tune(c: Channel) {
         g.handoff = true
         Repo.prefs.lastChannelKey = c.key
-        state.push(Screen.Player(PlayRequest.Live(c, lineup)))
+        val playbackLineup = if (lineup.any { it.key == c.key }) lineup
+            else (all + trending + c).distinctBy { it.key }
+        state.push(Screen.Player(PlayRequest.Live(c, playbackLineup)))
     }
 
     fun toggleFavorite(c: Channel) {
@@ -297,7 +334,7 @@ fun GuideScreen(state: AppState) {
 
     fun returnToNow() {
         g.focusTime = 0
-        g.windowStart = minTime
+        g.windowStart = floor30(System.currentTimeMillis())
         runCatching { gridFocus.requestFocus() }
     }
 
@@ -401,9 +438,9 @@ fun GuideScreen(state: AppState) {
         return false
     }
 
-    BackHandler(enabled = details == null && (gridFocused || g.focusTime > minTime || g.windowStart > minTime)) {
-        if (g.focusTime > minTime || g.windowStart > minTime) returnToNow()
-        else focusManager.moveFocus(FocusDirection.Up)
+    BackHandler(enabled = details == null && (gridFocused || g.isBrowsingFuture(System.currentTimeMillis()))) {
+        if (g.isBrowsingFuture(System.currentTimeMillis())) returnToNow()
+        else state.requestNavigation()
     }
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -419,14 +456,14 @@ fun GuideScreen(state: AppState) {
             ) {
                 ProgramInfo(
                     focusedChannel, focusedProgram, nextProgram, now, focusedChannel?.key in favorites,
-                    compact, Modifier.weight(1f).fillMaxHeight(),
+                    compact, Modifier.weight(1f).fillMaxHeight().testTag("guide-program-info"),
                     onToggleFavorite = { focusedChannel?.let(::toggleFavorite) },
                 )
                 Spacer(Modifier.width(if (compact) 16.dp else 28.dp))
                 PreviewWindow(
-                    focusedChannel, previewOn, previewChannelKey == focusedChannel?.key,
+                    watchedChannel, previewOn, PlayerHolder.isLive && PlayerHolder.currentUrl != null,
                     Modifier.width(previewWidth).height(previewWidth * 9f / 16f),
-                    onWatch = { focusedChannel?.let(::tune) },
+                    onWatch = { watchedChannel?.let(::tune) },
                 )
             }
             // ---------- category chips ----------
@@ -449,13 +486,19 @@ fun GuideScreen(state: AppState) {
                     .fillMaxWidth()
                     .testTag("guide-grid")
                     .focusRequester(gridFocus)
-                    .onFocusChanged { gridFocused = it.isFocused }
+                    .onFocusChanged {
+                        gridFocused = it.isFocused
+                        if (!it.isFocused) { okPress.reset(); longPressed = false }
+                    }
                     .onPreviewKeyEvent { e ->
                         val ne = e.nativeKeyEvent
-                        // Some remotes never set the long-press flag, so also go by how long OK has been held.
-                        val held = ne.eventTime - ne.downTime
+                        val code = e.key.nativeKeyCode
                         val down = e.type == KeyEventType.KeyDown
-                        onKey(e.key.nativeKeyCode, ne.repeatCount, ne.isLongPress || (down && ne.repeatCount > 0 && held >= LONG_PRESS_MS), down, held)
+                        val ok = code == AndroidKeyEvent.KEYCODE_DPAD_CENTER || code == AndroidKeyEvent.KEYCODE_ENTER
+                        val held = if (ok) okPress.heldMs(ne.eventTime, ne.repeatCount, down) else 0L
+                        if (ok && !down && ne.isCanceled) {
+                            okPress.reset(); longPressed = false; true
+                        } else onKey(code, ne.repeatCount, ne.isLongPress || (down && ne.repeatCount > 0 && held >= LONG_PRESS_MS), down, held)
                     }
                     .focusable(),
             ) {
@@ -808,18 +851,40 @@ private fun ProgramInfo(
 
 @Composable
 private fun PreviewWindow(c: Channel?, previewOn: Boolean, ready: Boolean, modifier: Modifier, onWatch: () -> Unit) {
-    val playing = previewOn && ready && c != null
+    if (c == null) {
+        Box(
+            modifier.clip(RoundedCornerShape(12.dp)).background(Palette.surface)
+                .border(1.dp, Palette.line, RoundedCornerShape(12.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(12.dp)) {
+                Icon(Icons.Rounded.PlayArrow, null, tint = Palette.dim, modifier = Modifier.size(24.dp))
+                Text("Choose a channel", color = Palette.text, fontSize = 12.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 4.dp))
+                Text("Press OK to watch", color = Palette.dim, fontSize = 10.sp, lineHeight = 14.sp)
+            }
+        }
+        return
+    }
+    val playing = previewOn && ready
     FocusBox(
-        onClick = onWatch, modifier = modifier, shape = RoundedCornerShape(12.dp),
+        onClick = onWatch, modifier = modifier.testTag("guide-preview").semantics {
+            contentDescription = "Watching ${c.number} ${c.name}. Press OK for full screen."
+        }, shape = RoundedCornerShape(12.dp),
         color = Palette.surface, focusedScale = 1.02f,
     ) { focused ->
         Box(Modifier.fillMaxSize().border(1.dp, Palette.line, RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
             if (playing) VideoSurface(Modifier.fillMaxSize(), texture = true)
-            else if (c != null) ChannelLogo(c, Modifier.size(86.dp, 48.dp))
+            else ChannelLogo(c, Modifier.size(86.dp, 48.dp))
             val err by PlayerHolder.error.collectAsState()
             if (playing && err != null) Text(
                 "Preview unavailable", color = Color.White, fontSize = 12.sp,
                 modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(Color.Black.copy(alpha = 0.75f)).padding(8.dp),
+            )
+            Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().height(40.dp).background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.75f), Color.Transparent))))
+            Text(
+                "Watching  ${c.number}  ${c.name}", color = Color.White, fontSize = 10.sp, lineHeight = 14.sp,
+                fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.align(Alignment.TopStart).padding(horizontal = 10.dp, vertical = 8.dp),
             )
             Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(40.dp).background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.8f)))))
             Row(
@@ -827,7 +892,7 @@ private fun PreviewWindow(c: Channel?, previewOn: Boolean, ready: Boolean, modif
                 horizontalArrangement = Arrangement.spacedBy(5.dp),
             ) {
                 Icon(Icons.Rounded.PlayArrow, null, tint = Color.White, modifier = Modifier.size(14.dp))
-                Text(if (focused) "Watch live" else if (playing) "Live preview · OK to watch" else "Watch live · OK", color = Color.White, fontSize = 10.sp, lineHeight = 14.sp, fontWeight = FontWeight.Medium)
+                Text(if (focused) "Return to full screen" else "OK Full screen", color = Color.White, fontSize = 10.sp, lineHeight = 14.sp, fontWeight = FontWeight.Medium)
             }
         }
     }
@@ -842,14 +907,7 @@ private fun CategoryChips(
     edge: Dp,
     onSelect: (String) -> Unit,
 ) {
-    val items = remember(categories, hasFavorites, hasTrending) {
-        buildList {
-            add(CAT_ALL to "All Channels")
-            if (hasTrending) add(CAT_HOT to "Trending")
-            add(CAT_FAV to "Favorites")
-            addAll(categories.filter { it.first !in setOf(CAT_ALL, CAT_HOT, CAT_FAV) }.distinctBy { it.first })
-        }
-    }
+    val items = remember(categories, hasTrending) { guideCategoryItems(categories, hasTrending) }
     LazyRow(
         Modifier.fillMaxWidth().height(44.dp),
         contentPadding = PaddingValues(horizontal = edge),
@@ -875,6 +933,31 @@ private fun CategoryChips(
     }
 }
 
+/** Keep the user's main cable categories together before the remaining provider groups. */
+internal fun guideCategoryItems(categories: List<Pair<String, String>>, hasTrending: Boolean): List<Pair<String, String>> {
+    fun rank(name: String): Int {
+        val normalized = name.uppercase(java.util.Locale.ROOT).replace(Regex("[^A-Z0-9]+"), " ").trim()
+            .removePrefix("USA ").removePrefix("US ")
+        return when (normalized) {
+            "SPORTS" -> 0
+            "PREMIUM" -> 1
+            "NEWS" -> 2
+            "MOVIES" -> 3
+            "ENTERTAINMENT" -> 4
+            "DOCUMENTARIES" -> 5
+            "LOCAL NEWS" -> 6
+            else -> 7
+        }
+    }
+    return buildList {
+        add(CAT_ALL to "All Channels")
+        add(CAT_FAV to "Favorites")
+        if (hasTrending) add(CAT_HOT to "Most Watched")
+        addAll(categories.filter { it.first !in setOf(CAT_ALL, CAT_HOT, CAT_FAV) }
+            .distinctBy { it.first }.sortedBy { rank(it.second) })
+    }
+}
+
 @Composable
 private fun GuideFooter(row: Int, total: Int, future: Boolean, compact: Boolean, edge: Dp, onNow: () -> Unit) {
     Row(
@@ -884,7 +967,8 @@ private fun GuideFooter(row: Int, total: Int, future: Boolean, compact: Boolean,
         Text("${row + 1} / $total channels", color = Palette.dim, fontSize = 10.sp, fontWeight = FontWeight.Medium)
         Spacer(Modifier.weight(1f))
         Text(
-            if (compact) "OK Watch  ·  Hold OK Favorite" else "OK Watch / details  ·  Hold OK Favorite  ·  ← → Schedule",
+            if (compact) "OK Watch  ·  Hold OK Favorite  ·  Back Navigation"
+            else "OK Watch / details  ·  Hold OK Favorite  ·  ← → Schedule  ·  CH +/− Page  ·  Back Now / navigation",
             color = Palette.dim, fontSize = 10.sp,
         )
         if (future) {

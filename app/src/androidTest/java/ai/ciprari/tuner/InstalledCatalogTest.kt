@@ -13,6 +13,26 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class InstalledCatalogTest {
+    @Test fun savedWorcesterMarketLoadsNearbyNewsAndKeepsCable() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("regionalCheck") == "true")
+        assertEquals(LocalLineup.WORCESTER_ZIP, Repo.prefs.localZip.value)
+        Repo.load()
+        val deadline = System.currentTimeMillis() + 90_000
+        while (Repo.liveStatus.value !is LoadStatus.Ready && Repo.liveStatus.value !is LoadStatus.Error && System.currentTimeMillis() < deadline) Thread.sleep(100)
+        assertTrue("The local guide did not finish loading", Repo.liveStatus.value is LoadStatus.Ready)
+        val channels = Repo.channels.value
+        val news = channels.filter { LocalLineup.LOCAL_NEWS_ID in it.categoryIds }
+        assertTrue("Nearby news category is empty", news.isNotEmpty())
+        assertTrue("Manchester's WMUR is missing", news.any { "WMUR" in it.name.uppercase() })
+        assertTrue("Boston's news stations are missing", news.any { Regex("WCVB|WBZ|WBTS|WFXT|WHDH").containsMatchIn(it.name.uppercase()) })
+        assertTrue("National cable news was removed", channels.any { it.name.contains("CNN", ignoreCase = true) })
+        assertTrue("Sports channels were removed", channels.any { it.name.contains("ESPN", ignoreCase = true) })
+        assertFalse("An outside-market affiliate remains", channels.any { Regex("\\b(?:WNBC|WABC|WCBS|WNYW|KABC|KCAL|KTVU|WLS)\\b").containsMatchIn(it.name.uppercase()) })
+        InstrumentationRegistry.getInstrumentation().sendStatus(2, Bundle().apply {
+            putString("stream", "Regional guide: ${channels.size} channels, ${news.size} nearby news feeds. Stations: ${news.map { it.name }.distinct().joinToString()}\n")
+        })
+    }
+
     @Test fun existingProviderLoadsLiveMoviesAndSeries() {
         assumeTrue(InstrumentationRegistry.getArguments().getString("providerCheck") == "true")
         val instrumentation = InstrumentationRegistry.getInstrumentation()

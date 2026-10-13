@@ -2,6 +2,9 @@ package ai.ciprari.tuner.ui
 
 import android.view.KeyEvent as AndroidKeyEvent
 import android.view.LayoutInflater
+import android.content.Context
+import android.content.ContextWrapper
+import android.graphics.Rect
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -10,6 +13,9 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -39,6 +45,8 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.StarBorder
+import androidx.compose.material.icons.rounded.PictureInPictureAlt
+import androidx.compose.material.icons.rounded.List
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -67,6 +75,7 @@ import androidx.compose.ui.input.key.nativeKeyCode
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
@@ -82,6 +91,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.ui.PlayerView
 import ai.ciprari.tuner.R
+import ai.ciprari.tuner.MainActivity
 import ai.ciprari.tuner.data.Channel
 import ai.ciprari.tuner.data.PlayRequest
 import ai.ciprari.tuner.data.Program
@@ -98,7 +108,13 @@ fun VideoSurface(modifier: Modifier, texture: Boolean) {
         factory = { ctx ->
             (LayoutInflater.from(ctx).inflate(
                 if (texture) R.layout.player_texture else R.layout.player_surface, null, false,
-            ) as PlayerView).apply { player = PlayerHolder.player }
+            ) as PlayerView).apply {
+                player = PlayerHolder.player
+                if (!texture) addOnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
+                    val bounds = Rect()
+                    if (view.getGlobalVisibleRect(bounds)) ctx.tunerActivity()?.updatePipSourceRect(bounds)
+                }
+            }
         },
         modifier = modifier,
         update = { view -> if (view.player !== PlayerHolder.player) view.player = PlayerHolder.player },
@@ -145,10 +161,36 @@ private fun rememberPlaybackUi(): PlaybackUi {
 
 @Composable
 fun PlayerScreen(request: PlayRequest, onExit: (Channel?) -> Unit) {
+    DisposableEffect(Unit) {
+        PlayerHolder.setFullscreenPlayback(true)
+        onDispose { PlayerHolder.setFullscreenPlayback(false) }
+    }
     when (request) {
         is PlayRequest.Live -> LivePlayer(request, onExit)
         is PlayRequest.Vod -> VodPlayer(request) { onExit(null) }
     }
+}
+
+private fun Context.tunerActivity(): MainActivity? {
+    var context = this
+    while (context is ContextWrapper) {
+        if (context is MainActivity) return context
+        val next = context.baseContext
+        if (next === context) break
+        context = next
+    }
+    return context as? MainActivity
+}
+
+@Composable
+private fun PictureInPictureButton(modifier: Modifier = Modifier) {
+    val supported by PlayerHolder.pipSupported.collectAsState()
+    val context = LocalContext.current
+    if (supported) PillButton("Picture in picture", {
+        if (context.tunerActivity()?.enterTunerPictureInPicture() != true) {
+            Toasts.show("Picture in picture couldn't start. Play a video and check Tuner's PiP setting in Android.")
+        }
+    }, modifier, icon = { Icon(Icons.Rounded.PictureInPictureAlt, null, tint = it, modifier = Modifier.size(18.dp)) })
 }
 
 // =================================================================== live
@@ -171,17 +213,29 @@ private fun LivePlayer(req: PlayRequest.Live, onExit: (Channel?) -> Unit) {
     var step by remember { mutableIntStateOf(1) }
     var skips by remember { mutableIntStateOf(0) }
     var favoriteLongPress by remember { mutableStateOf(false) }
+    val okPress = remember { GuideOkPress() }
     var favoriteNotice by remember { mutableStateOf<String?>(null) }
     var favoriteNoticeTick by remember { mutableIntStateOf(0) }
+    var videoFocused by remember { mutableStateOf(true) }
+    var controlsFocused by remember { mutableStateOf(false) }
+    var controlsRequested by remember { mutableStateOf(false) }
+    val controlsFocus = remember { FocusRequester() }
     val rootFocus = remember { FocusRequester() }
     val ui = rememberPlaybackUi()
+    val player = PlayerHolder.player
     val error by PlayerHolder.error.collectAsState()
     val unavailable by PlayerHolder.unavailable.collectAsState()
     val favorites by Repo.prefs.favorites.collectAsState()
+    val pipVideoOnly by PlayerHolder.pipVideoOnly.collectAsState()
     val epgVersion by Repo.epgVersion.collectAsState()
     val now = rememberNow(15_000)
 
     fun showBanner() { bannerVisible = true; bannerTick++ }
+    fun togglePlayback() {
+        if (error != null) PlayerHolder.retry()
+        else if (player.playWhenReady) player.pause() else player.play()
+        showBanner()
+    }
     fun toggleFavorite(c: Channel) {
         val added = Repo.prefs.toggleFavorite(c.key)
         favoriteNotice = if (added) "${c.name} added to Favorites" else "${c.name} removed from Favorites"
@@ -203,7 +257,8 @@ private fun LivePlayer(req: PlayRequest.Live, onExit: (Channel?) -> Unit) {
             // Hang up on the old channel now. Single-connection plans only accept the next stream
             // once the provider has let go of this one, so the sooner it closes the faster the zap.
             PlayerHolder.releaseForZap()
-        }
+        } else if (error != null) PlayerHolder.retry()
+        else if (!player.playWhenReady) player.play()
         showBanner()
     }
 
@@ -225,7 +280,20 @@ private fun LivePlayer(req: PlayRequest.Live, onExit: (Channel?) -> Unit) {
     }
     LaunchedEffect(ui.playing) { if (ui.playing) skips = 0 }
     LaunchedEffect(favoriteNoticeTick) { if (favoriteNotice != null) { delay(2200); favoriteNotice = null } }
-    LaunchedEffect(bannerTick, panelOpen) { delay(6000); if (!panelOpen) bannerVisible = false }
+    LaunchedEffect(bannerTick, panelOpen, controlsFocused) { delay(6000); if (!panelOpen && !controlsFocused) bannerVisible = false }
+    LaunchedEffect(controlsRequested, bannerVisible) {
+        if (controlsRequested && bannerVisible && !panelOpen && !pipVideoOnly) {
+            delay(40)
+            runCatching { controlsFocus.requestFocus() }
+            controlsRequested = false
+        }
+    }
+    LaunchedEffect(pipVideoOnly) {
+        panelOpen = false
+        controlsRequested = false
+        if (!pipVideoOnly) { showBanner(); delay(40); runCatching { rootFocus.requestFocus() } }
+    }
+    LaunchedEffect(videoFocused) { if (!videoFocused) { okPress.reset(); favoriteLongPress = false } }
     LaunchedEffect(panelOpen) { if (!panelOpen) { delay(30); runCatching { rootFocus.requestFocus() } } }
     LaunchedEffect(digits) {
         if (digits.isEmpty()) return@LaunchedEffect
@@ -235,24 +303,38 @@ private fun LivePlayer(req: PlayRequest.Live, onExit: (Channel?) -> Unit) {
         if (idx >= 0) zap(idx)
     }
 
-    BackHandler {
-        if (panelOpen) panelOpen = false else onExit(channel)
+    BackHandler(enabled = !pipVideoOnly) {
+        when {
+            panelOpen -> panelOpen = false
+            !videoFocused -> rootFocus.requestFocus()
+            else -> onExit(channel)
+        }
     }
 
     Box(
         Modifier.fillMaxSize().background(Color.Black)
             .focusRequester(rootFocus)
+            .onFocusChanged { videoFocused = it.isFocused }
             .onPreviewKeyEvent { e ->
-                if (panelOpen) return@onPreviewKeyEvent false
+                if (!pipVideoOnly && e.type == KeyEventType.KeyDown) {
+                    when (e.key.nativeKeyCode) {
+                        AndroidKeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, AndroidKeyEvent.KEYCODE_SPACE -> { togglePlayback(); return@onPreviewKeyEvent true }
+                        AndroidKeyEvent.KEYCODE_MEDIA_PLAY -> { player.play(); showBanner(); return@onPreviewKeyEvent true }
+                        AndroidKeyEvent.KEYCODE_MEDIA_PAUSE -> { player.pause(); showBanner(); return@onPreviewKeyEvent true }
+                    }
+                }
+                if (panelOpen || !videoFocused || pipVideoOnly) return@onPreviewKeyEvent false
                 if (e.key.nativeKeyCode in listOf(AndroidKeyEvent.KEYCODE_DPAD_CENTER, AndroidKeyEvent.KEYCODE_ENTER)) {
+                    val held = okPress.heldMs(e.nativeKeyEvent.eventTime, e.nativeKeyEvent.repeatCount, e.type == KeyEventType.KeyDown)
                     if (e.type == KeyEventType.KeyDown) {
                         if (e.nativeKeyEvent.repeatCount == 0) favoriteLongPress = false
-                        if (e.nativeKeyEvent.isLongPress && !favoriteLongPress) {
+                        if ((e.nativeKeyEvent.isLongPress || (e.nativeKeyEvent.repeatCount > 0 && held >= LONG_PRESS_MS)) && !favoriteLongPress) {
                             favoriteLongPress = true
                             toggleFavorite(channel)
                         }
                     } else if (e.type == KeyEventType.KeyUp) {
-                        if (!favoriteLongPress) {
+                        if (!favoriteLongPress && held >= LONG_PRESS_MS) toggleFavorite(channel)
+                        else if (!favoriteLongPress) {
                             if (error != null) PlayerHolder.retry()
                             else if (bannerVisible) panelOpen = true else showBanner()
                         }
@@ -265,7 +347,8 @@ private fun LivePlayer(req: PlayRequest.Live, onExit: (Channel?) -> Unit) {
                     AndroidKeyEvent.KEYCODE_DPAD_UP, AndroidKeyEvent.KEYCODE_CHANNEL_UP, AndroidKeyEvent.KEYCODE_PAGE_UP -> { zap(index + 1, 1); true }
                     AndroidKeyEvent.KEYCODE_DPAD_DOWN, AndroidKeyEvent.KEYCODE_CHANNEL_DOWN, AndroidKeyEvent.KEYCODE_PAGE_DOWN -> { zap(index - 1, -1); true }
                     AndroidKeyEvent.KEYCODE_DPAD_LEFT, AndroidKeyEvent.KEYCODE_MENU -> { panelOpen = true; true }
-                    AndroidKeyEvent.KEYCODE_DPAD_RIGHT, AndroidKeyEvent.KEYCODE_INFO -> { showBanner(); true }
+                    AndroidKeyEvent.KEYCODE_DPAD_RIGHT -> { showBanner(); controlsRequested = true; true }
+                    AndroidKeyEvent.KEYCODE_INFO -> { showBanner(); true }
                     AndroidKeyEvent.KEYCODE_LAST_CHANNEL -> { zap(previous); true }
                     AndroidKeyEvent.KEYCODE_GUIDE -> { onExit(channel); true }
                     in AndroidKeyEvent.KEYCODE_0..AndroidKeyEvent.KEYCODE_9 -> {
@@ -278,14 +361,20 @@ private fun LivePlayer(req: PlayRequest.Live, onExit: (Channel?) -> Unit) {
             .focusable(),
     ) {
         VideoSurface(Modifier.fillMaxSize(), texture = false)
-        // Live has no pause, so "not playing yet" means tuning: show the spinner from the first press.
-        if ((ui.buffering || !ui.playing) && error == null) {
+        if (!pipVideoOnly) {
+        if ((ui.buffering || player.playbackState == Player.STATE_IDLE) && error == null) {
             CircularProgressIndicator(color = Color.White, strokeWidth = 3.dp, modifier = Modifier.align(Alignment.Center).size(44.dp))
+        }
+        if (!player.playWhenReady && player.playbackState == Player.STATE_READY) {
+            Text("Paused", color = Color.White, fontSize = 13.sp,
+                modifier = Modifier.align(Alignment.TopEnd).padding(24.dp).clip(RoundedCornerShape(50)).background(Color.Black.copy(alpha = 0.7f)).padding(horizontal = 14.dp, vertical = 8.dp))
         }
         error?.let { ErrorCard(it, "Press OK to retry, or change channel", Modifier.align(Alignment.Center)) }
 
         AnimatedVisibility(bannerVisible && !panelOpen, Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = fadeOut()) {
-            androidx.compose.runtime.key(epgVersion) { LiveBanner(channel, now, channel.key in favorites, onFavorite = { toggleFavorite(channel) }) }
+            LiveBanner(channel, now, epgVersion, channel.key in favorites, onFavorite = { toggleFavorite(channel) },
+                playing = player.playWhenReady, onTogglePlayback = ::togglePlayback,
+                controlsFocus = controlsFocus, onControlsFocus = { controlsFocused = it }, onChannels = { panelOpen = true }, onReturnToVideo = { rootFocus.requestFocus() })
         }
         if (digits.isNotEmpty()) {
             Text(
@@ -305,6 +394,7 @@ private fun LivePlayer(req: PlayRequest.Live, onExit: (Channel?) -> Unit) {
                 modifier = Modifier.align(Alignment.TopCenter).padding(top = 22.dp, start = 24.dp, end = 24.dp)
                     .clip(RoundedCornerShape(50)).background(Color(0xFF142338).copy(alpha = 0.95f)).padding(horizontal = 18.dp, vertical = 10.dp))
         }
+        }
     }
     LaunchedEffect(Unit) { runCatching { rootFocus.requestFocus() } }
 }
@@ -316,8 +406,8 @@ private fun nowNext(c: Channel, now: Long): Pair<Program?, Program?> {
 }
 
 @Composable
-private fun LiveBanner(c: Channel, now: Long, favorite: Boolean, onFavorite: () -> Unit) {
-    val (cur, next) = nowNext(c, now)
+private fun LiveBanner(c: Channel, now: Long, epgVersion: Int, favorite: Boolean, onFavorite: () -> Unit, playing: Boolean, onTogglePlayback: () -> Unit, controlsFocus: FocusRequester, onControlsFocus: (Boolean) -> Unit, onChannels: () -> Unit, onReturnToVideo: () -> Unit) {
+    val (cur, next) = remember(c, now, epgVersion) { nowNext(c, now) }
     BoxWithConstraints(
         Modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.92f))))
     ) {
@@ -361,8 +451,23 @@ private fun LiveBanner(c: Channel, now: Long, favorite: Boolean, onFavorite: () 
                     )
                 }
             }
+            Row(
+                Modifier.fillMaxWidth().padding(top = 14.dp).horizontalScroll(rememberScrollState())
+                    .onFocusChanged { onControlsFocus(it.hasFocus) }.focusGroup()
+                    .onPreviewKeyEvent { e ->
+                        if (e.type == KeyEventType.KeyDown && e.key.nativeKeyCode in listOf(AndroidKeyEvent.KEYCODE_DPAD_UP, AndroidKeyEvent.KEYCODE_DPAD_DOWN)) {
+                            onReturnToVideo(); true
+                        } else false
+                    },
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                PillButton("Channels", onChannels, Modifier.focusRequester(controlsFocus), icon = { Icon(Icons.Rounded.List, null, tint = it, modifier = Modifier.size(18.dp)) })
+                PillButton(if (playing) "Pause" else "Play", onTogglePlayback, icon = { Icon(if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, null, tint = it, modifier = Modifier.size(18.dp)) })
+                PillButton(if (favorite) "Saved" else "Favorite", onFavorite, icon = { Icon(if (favorite) Icons.Rounded.Star else Icons.Rounded.StarBorder, null, tint = it, modifier = Modifier.size(18.dp)) })
+                PictureInPictureButton()
+            }
             Text(
-                "↑ ↓  Change channel     OK / ←  Channels     Hold OK  Favorite     Back  Return", color = Color.White.copy(alpha = 0.62f), fontSize = 11.sp,
+                "↑ ↓ / CH + −  Channel     ←  Channel list     →  Controls     Hold OK  Favorite     Back  Return", color = Color.White.copy(alpha = 0.62f), fontSize = 11.sp,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 16.dp).align(Alignment.End),
             )
         }
@@ -371,31 +476,55 @@ private fun LiveBanner(c: Channel, now: Long, favorite: Boolean, onFavorite: () 
 
 @Composable
 private fun ChannelPanel(lineup: List<Channel>, current: Int, now: Long, epgVersion: Int, favorites: Set<String>, onFavorite: (Channel) -> Unit, onDismiss: () -> Unit, onPick: (Int) -> Unit) {
+    var favoritesOnly by remember { mutableStateOf(false) }
+    var rowsFocused by remember { mutableStateOf(false) }
+    val shown = remember(lineup, favorites, favoritesOnly) { lineup.withIndex().filter { !favoritesOnly || it.value.key in favorites } }
     val list = rememberLazyListState(initialFirstVisibleItemIndex = (current - 2).coerceAtLeast(0))
     val currentFocus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { delay(60); runCatching { currentFocus.requestFocus() } }
+    val allFocus = remember { FocusRequester() }
+    val focusIndex = shown.indexOfFirst { it.index == current }.coerceAtLeast(0)
+    LaunchedEffect(favoritesOnly) {
+        if (shown.isNotEmpty()) list.scrollToItem((focusIndex - 1).coerceAtLeast(0))
+        delay(60)
+        runCatching { if (shown.isEmpty()) allFocus.requestFocus() else currentFocus.requestFocus() }
+    }
+    LaunchedEffect(favorites, favoritesOnly) {
+        if (favoritesOnly && shown.isEmpty()) { delay(40); runCatching { allFocus.requestFocus() } }
+    }
     BoxWithConstraints(Modifier.fillMaxSize()) {
     Column(
         Modifier.width((maxWidth * 0.58f).coerceAtMost(440.dp)).fillMaxHeight()
             .background(Brush.horizontalGradient(listOf(Color(0xFF0B1321).copy(alpha = 0.98f), Color(0xFF101B2A).copy(alpha = 0.96f))))
             .onPreviewKeyEvent { e ->
-                if (e.type == KeyEventType.KeyDown && e.key.nativeKeyCode == AndroidKeyEvent.KEYCODE_DPAD_RIGHT) { onDismiss(); true } else false
+                if (rowsFocused && e.type == KeyEventType.KeyDown && e.key.nativeKeyCode == AndroidKeyEvent.KEYCODE_DPAD_RIGHT) { onDismiss(); true } else false
             },
     ) {
         Column(Modifier.padding(horizontal = 24.dp, vertical = 22.dp)) {
             Text("Channels", color = Color.White, fontSize = 23.sp, fontWeight = FontWeight.Bold)
-            Text("${lineup.size} channels  ·  ${fmtTime(now)}", color = Color.White.copy(alpha = 0.65f), fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+            Text("${shown.size} channels  ·  ${fmtTime(now)}", color = Color.White.copy(alpha = 0.65f), fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+            Row(Modifier.padding(top = 14.dp).focusGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                PillButton("All", { favoritesOnly = false }, Modifier.focusRequester(allFocus), primary = !favoritesOnly)
+                PillButton("Favorites", { favoritesOnly = true }, primary = favoritesOnly, icon = { Icon(Icons.Rounded.Star, null, tint = it, modifier = Modifier.size(16.dp)) })
+            }
         }
+        if (shown.isEmpty()) {
+            Column(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp), verticalArrangement = Arrangement.Center) {
+                Text("No favorites yet", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                Text("Choose All, then hold OK on a channel to save it here.", color = Color.White.copy(alpha = 0.72f), fontSize = 13.sp, lineHeight = 19.sp, modifier = Modifier.padding(top = 8.dp))
+            }
+        } else {
         LazyColumn(
-            modifier = Modifier.weight(1f), state = list, contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
+            modifier = Modifier.weight(1f).onFocusChanged { rowsFocused = it.hasFocus }.focusGroup(), state = list, contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            itemsIndexed(lineup, key = { _, c -> c.key }) { i, c ->
+            itemsIndexed(shown, key = { _, row -> row.value.key }) { shownIndex, row ->
+                val i = row.index
+                val c = row.value
                 val cur = remember(c.key, now, epgVersion) { Repo.programsFor(c)?.firstOrNull { it.isOnAt(now) } }
                 FocusBox(
                     onClick = { onPick(i) },
                     onLongClick = { onFavorite(c) },
-                    modifier = Modifier.fillMaxWidth().height(66.dp).then(if (i == current) Modifier.focusRequester(currentFocus) else Modifier),
+                    modifier = Modifier.fillMaxWidth().height(66.dp).then(if (shownIndex == focusIndex) Modifier.focusRequester(currentFocus) else Modifier),
                     shape = RoundedCornerShape(10.dp),
                     color = if (i == current) Color.White.copy(alpha = 0.12f) else Color.Transparent,
                     focusedColor = Palette.focus, ring = false, focusedScale = 1.0f,
@@ -413,6 +542,7 @@ private fun ChannelPanel(lineup: List<Channel>, current: Int, now: Long, epgVers
                     }
                 }
             }
+        }
         }
         Text("OK Watch  ·  Hold OK Favorite  ·  Back Close", color = Color.White.copy(alpha = 0.65f), fontSize = 11.sp,
             modifier = Modifier.padding(horizontal = 24.dp, vertical = 18.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -454,6 +584,7 @@ private fun VodPlayer(req: PlayRequest.Vod, onExit: () -> Unit) {
     val error by PlayerHolder.error.collectAsState()
     val player = PlayerHolder.player
     val torrentStatus by ai.ciprari.tuner.player.TorrentEngine.status.collectAsState()
+    val pipVideoOnly by PlayerHolder.pipVideoOnly.collectAsState()
 
     fun showControls() { controlsVisible = true; controlsTick++ }
     fun save() {
@@ -472,7 +603,11 @@ private fun VodPlayer(req: PlayRequest.Vod, onExit: () -> Unit) {
         showControls()
     }
     fun playNext() {
-        val next = queue.firstOrNull() ?: return onExit()
+        val next = queue.firstOrNull()
+        if (next == null) {
+            if (pipVideoOnly) player.pause() else onExit()
+            return
+        }
         save()
         queue = queue.drop(1)
         current = next
@@ -495,8 +630,13 @@ private fun VodPlayer(req: PlayRequest.Vod, onExit: () -> Unit) {
         }
     }
     LaunchedEffect(trackDialog) { if (trackDialog == null) { delay(30); runCatching { rootFocus.requestFocus() } } }
+    LaunchedEffect(pipVideoOnly) {
+        trackDialog = null
+        optionsRequested = false
+        if (!pipVideoOnly) { showControls(); delay(40); runCatching { rootFocus.requestFocus() } }
+    }
 
-    BackHandler {
+    BackHandler(enabled = !pipVideoOnly) {
         when {
             trackDialog != null -> trackDialog = null
             optionsFocused -> runCatching { rootFocus.requestFocus() }
@@ -508,17 +648,20 @@ private fun VodPlayer(req: PlayRequest.Vod, onExit: () -> Unit) {
         Modifier.fillMaxSize().background(Color.Black)
             .focusRequester(rootFocus)
             .onPreviewKeyEvent { e ->
-                if (e.type != KeyEventType.KeyDown || trackDialog != null || optionsFocused) return@onPreviewKeyEvent false
+                if (pipVideoOnly || e.type != KeyEventType.KeyDown || trackDialog != null || optionsFocused) return@onPreviewKeyEvent false
                 val repeat = e.nativeKeyEvent.repeatCount
                 val step = 10_000L * (1 + repeat / 4).coerceAtMost(12)
                 when (e.key.nativeKeyCode) {
                     AndroidKeyEvent.KEYCODE_DPAD_CENTER, AndroidKeyEvent.KEYCODE_ENTER,
                     AndroidKeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, AndroidKeyEvent.KEYCODE_SPACE -> {
                         if (error != null) PlayerHolder.retry()
-                        else if (player.isPlaying) player.pause() else player.play()
+                        else if (player.isPlaying) player.pause() else {
+                            if (player.playbackState == Player.STATE_ENDED) player.seekTo(0)
+                            player.play()
+                        }
                         showControls(); true
                     }
-                    AndroidKeyEvent.KEYCODE_MEDIA_PLAY -> { player.play(); showControls(); true }
+                    AndroidKeyEvent.KEYCODE_MEDIA_PLAY -> { if (player.playbackState == Player.STATE_ENDED) player.seekTo(0); player.play(); showControls(); true }
                     AndroidKeyEvent.KEYCODE_MEDIA_PAUSE -> { player.pause(); showControls(); true }
                     AndroidKeyEvent.KEYCODE_DPAD_LEFT -> { seekBy(-step); true }
                     AndroidKeyEvent.KEYCODE_DPAD_RIGHT -> { seekBy(step); true }
@@ -537,6 +680,7 @@ private fun VodPlayer(req: PlayRequest.Vod, onExit: () -> Unit) {
         val compact = maxWidth < 760.dp || maxHeight < 440.dp
         val edge = if (compact) 24.dp else 40.dp
         VideoSurface(Modifier.fillMaxSize(), texture = false)
+        if (!pipVideoOnly) {
         if (current.url.startsWith("torrent:") && error == null && ui.buffering) {
             Text(torrentStatus ?: "Finding torrent peers...", color = Color.White, fontSize = 15.sp,
                 modifier = Modifier.align(Alignment.Center).padding(top = 100.dp, start = 24.dp, end = 24.dp))
@@ -578,7 +722,7 @@ private fun VodPlayer(req: PlayRequest.Vod, onExit: () -> Unit) {
                         )
                     }
                     Row(
-                        Modifier.padding(top = 16.dp).onFocusChanged { optionsFocused = it.hasFocus }
+                        Modifier.padding(top = 16.dp).horizontalScroll(rememberScrollState()).onFocusChanged { optionsFocused = it.hasFocus }.focusGroup()
                             .onPreviewKeyEvent { e ->
                                 if (e.type == KeyEventType.KeyDown && e.key.nativeKeyCode == AndroidKeyEvent.KEYCODE_DPAD_UP) {
                                     rootFocus.requestFocus(); showControls(); true
@@ -598,8 +742,9 @@ private fun VodPlayer(req: PlayRequest.Vod, onExit: () -> Unit) {
                             "Next episode", { playNext() },
                             icon = { Icon(Icons.Rounded.SkipNext, null, tint = it, modifier = Modifier.size(18.dp)) },
                         )
+                        PictureInPictureButton()
                     }
-                    Text("OK  ${if (ui.playing) "Pause" else "Play"}     ← →  Seek 10s     ↓  Audio & subtitles     Back  Exit",
+                    Text("OK  ${if (ui.playing) "Pause" else "Play"}     ← →  Seek 10s     ↓  Controls     Back  Return",
                         color = Color.White.copy(alpha = 0.65f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.padding(top = 13.dp))
                 }
@@ -607,6 +752,7 @@ private fun VodPlayer(req: PlayRequest.Vod, onExit: () -> Unit) {
         }
         trackDialog?.let { type ->
             TrackDialog(type, ui.tracksVersion, onClose = { trackDialog = null })
+        }
         }
     }
     LaunchedEffect(Unit) { runCatching { rootFocus.requestFocus() } }

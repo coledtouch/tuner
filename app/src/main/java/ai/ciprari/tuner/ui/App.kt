@@ -13,10 +13,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.dp
 import ai.ciprari.tuner.data.Movie
 import ai.ciprari.tuner.data.PlayRequest
@@ -57,6 +61,14 @@ class AppState {
     var searchFocusedKey by mutableStateOf<String?>(null)
     /** True when the current home tab should grab focus (app start, coming back from a detail page). */
     var restoreFocus by mutableStateOf(true)
+    var navigationRequest by mutableIntStateOf(0)
+        private set
+    var navigationFocused by mutableStateOf(false)
+    internal var handledNavigationRequest = 0
+    fun requestNavigation() {
+        restoreFocus = false
+        navigationRequest++
+    }
 
     val top: Screen get() = stack.last()
     fun push(s: Screen) { stack.add(s) }
@@ -72,6 +84,7 @@ fun App() {
     val state = remember { AppState() }
     val sources by Repo.prefs.sources.collectAsState()
     val activeId by Repo.prefs.activeId.collectAsState()
+    val pipVideoOnly by PlayerHolder.pipVideoOnly.collectAsState()
 
     // First run: go straight to the add-source form.
     LaunchedEffect(Unit) {
@@ -81,13 +94,17 @@ fun App() {
     LaunchedEffect(activeId) { state.guide.reset() }
 
     BackHandler(enabled = state.stack.size > 1 && state.top !is Screen.Player) { state.pop() }
-    // On the home screen, Back from any tab other than the guide returns to the guide first.
-    BackHandler(enabled = state.stack.size == 1 && state.top == Screen.Home && state.tab != Tab.GUIDE) {
-        state.tab = Tab.GUIDE
-        state.restoreFocus = true
-    }
 
-    Box(Modifier.fillMaxSize().background(Palette.bg)) {
+    Box(Modifier.fillMaxSize().background(Palette.bg).onPreviewKeyEvent { event ->
+        val canOpenGuide = state.top == Screen.Home || state.top is Screen.MovieDetail || state.top is Screen.SeriesDetail
+        if (!pipVideoOnly && canOpenGuide && event.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_GUIDE) {
+            if (event.type == KeyEventType.KeyDown && event.nativeKeyEvent.repeatCount == 0) {
+                state.tab = Tab.GUIDE
+                state.replaceAll(Screen.Home)
+            }
+            true
+        } else false
+    }) {
         when (val s = state.top) {
             Screen.Home -> HomeScreen(state)
             is Screen.EditSource -> key(s) {
@@ -113,6 +130,6 @@ fun App() {
                 })
             }
         }
-        ToastHost(Modifier.align(Alignment.BottomCenter).padding(bottom = 28.dp))
+        if (!pipVideoOnly) ToastHost(Modifier.align(Alignment.BottomCenter).padding(bottom = 28.dp))
     }
 }

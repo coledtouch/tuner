@@ -39,7 +39,7 @@ class TorrentioScreenTest {
                 TunerTheme { androidx.compose.foundation.layout.Box(Modifier.fillMaxSize()) { TorrentioScreen(state, loadCatalog = false) } }
             }
         }
-        rule.onNodeWithText("Torrentio").assertExists()
+        rule.onNodeWithText("Discover").assertExists()
         rule.onNodeWithText("Series", useUnmergedTree = true).performClick()
         rule.onNodeWithText("Series").assertExists()
         rule.onNodeWithText("Search by title").assertExists()

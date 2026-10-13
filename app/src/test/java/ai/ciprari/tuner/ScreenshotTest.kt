@@ -137,10 +137,17 @@ class ScreenshotTest {
         rule.mainClock.advanceTimeBy(600)
         shot("03_guide_right4")
         rule.onRoot().performKeyInput { pressKey(Key.Enter) }
+        rule.runOnIdle { androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications() }
         rule.mainClock.advanceTimeBy(600)
+        rule.waitForIdle()
+        org.robolectric.shadows.ShadowLooper.idleMainLooper()
+        repeat(3) { rule.mainClock.advanceTimeByFrame() }
+        rule.waitForIdle()
+        rule.onNodeWithText("Watch channel now").assertExists()
         rule.runOnIdle {
             // Robolectric does not deliver the window-focus event Android sends to a modal.
-            org.robolectric.shadows.ShadowDialog.getLatestDialog().window!!.decorView.dispatchWindowFocusChanged(true)
+            val dialog = checkNotNull(org.robolectric.shadows.ShadowDialog.getLatestDialog()) { "Future program dialog was not created" }
+            dialog.window!!.decorView.dispatchWindowFocusChanged(true)
             androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
         }
         rule.onNodeWithText("Watch channel now").performSemanticsAction(SemanticsActions.RequestFocus) { it() }
@@ -262,10 +269,16 @@ class ScreenshotTest {
         rule.runOnIdle {
             assertEquals(10, state.guide.row)
             rule.activity.onBackPressedDispatcher.onBackPressed()
+            androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
         }
         rule.mainClock.advanceTimeBy(300)
+        rule.waitForIdle()
+        org.robolectric.shadows.ShadowLooper.idleMainLooper()
+        repeat(3) { rule.mainClock.advanceTimeByFrame() }
+        rule.onNodeWithContentDescription(Tab.GUIDE.title).assertIsFocused()
         rule.onRoot().performKeyInput { pressKey(Key.DirectionRight) }
         rule.mainClock.advanceTimeBy(300)
+        rule.onNodeWithContentDescription(Tab.MOVIES.title).assertIsFocused()
         rule.runOnIdle {
             assertEquals(10, state.guide.row)
             assertEquals("Remote focus should leave the schedule on Back", 0L, state.guide.focusTime)

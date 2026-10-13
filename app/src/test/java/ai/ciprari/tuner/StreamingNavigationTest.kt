@@ -127,7 +127,7 @@ class StreamingNavigationTest {
         val state = state()
         mount(state)
         open(film)
-        rule.onNodeWithText("Options").performClick()
+        rule.onNodeWithText("Setup").performClick()
         rule.onNodeWithText("Done").performClick()
         rule.waitForIdle()
         rule.runOnIdle { assertEquals(film.id, state.torrentioBrowse.selected?.id); assertFalse(state.torrentioBrowse.configuring) }

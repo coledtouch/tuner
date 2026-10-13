@@ -79,7 +79,10 @@ private fun Backdrop(image: String?) {
 @Composable
 private fun DetailHeader(label: String, state: AppState, modifier: Modifier = Modifier) {
     Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, color = Palette.accent, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.8.sp, modifier = Modifier.weight(1f))
+        Column(Modifier.weight(1f)) {
+            Text(label, color = Palette.accent, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.8.sp)
+            Text("Arrows Move · OK Select · Back Return", color = Palette.dim, fontSize = 10.sp, maxLines = 1, modifier = Modifier.padding(top = 4.dp))
+        }
         PillButton("Back", { state.pop() }, icon = { Icon(Icons.Rounded.ArrowBack, null, tint = it, modifier = Modifier.size(18.dp)) })
     }
 }

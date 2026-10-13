@@ -24,6 +24,18 @@ class Prefs(context: Context) {
     private val _recents = MutableStateFlow(readRecents())
     val recents: StateFlow<List<Recent>> = _recents
 
+    /** Blank keeps every U.S. local market. Only an explicitly selected supported market is filtered. */
+    private val _localZip = MutableStateFlow(sp.getString("localZip", "").orEmpty())
+    val localZip: StateFlow<String> = _localZip
+
+    fun setLocalZip(zip: String): Boolean {
+        val value = zip.trim()
+        if (value.isNotEmpty() && LocalLineup.marketForZip(value) == null) return false
+        sp.edit().putString("localZip", value).apply()
+        _localZip.value = value
+        return true
+    }
+
     var liveFormat: String
         get() = sp.getString("liveFormat", "ts") ?: "ts"
         set(v) = sp.edit().putString("liveFormat", v).apply()

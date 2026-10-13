@@ -1,5 +1,14 @@
 package ai.ciprari.tuner.ui
 
+import androidx.activity.compose.BackHandler
+import android.view.KeyEvent as AndroidKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -65,7 +74,13 @@ object Toasts {
 
 @Composable
 fun HomeScreen(state: AppState) {
-    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Palette.surface, Palette.bg, Palette.bg)))) {
+    HomeNavigationBackHandler(state)
+    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Palette.surface, Palette.bg, Palette.bg)))
+        .onPreviewKeyEvent {
+            if (it.type == KeyEventType.KeyDown && it.nativeKeyEvent.keyCode == AndroidKeyEvent.KEYCODE_MENU) {
+                state.requestNavigation(); true
+            } else false
+        }) {
         Column(Modifier.fillMaxSize()) {
             TopBar(state)
             Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -83,7 +98,22 @@ fun HomeScreen(state: AppState) {
 }
 
 @Composable
+internal fun HomeNavigationBackHandler(state: AppState) {
+    BackHandler(enabled = !state.navigationFocused || state.tab != Tab.GUIDE) {
+        if (state.navigationFocused) state.tab = Tab.GUIDE
+        state.requestNavigation()
+    }
+}
+
+@Composable
 private fun TopBar(state: AppState) {
+    val requesters = remember { Tab.entries.associateWith { FocusRequester() } }
+    LaunchedEffect(state.navigationRequest) {
+        val request = state.navigationRequest
+        if (request > state.handledNavigationRequest && requestAttachedFocus(requesters.getValue(state.tab))) {
+            state.handledNavigationRequest = request
+        }
+    }
     val now = rememberNow(15_000)
     val live by Repo.liveStatus.collectAsState()
     val epg by Repo.epgStatus.collectAsState()
@@ -107,18 +137,24 @@ private fun TopBar(state: AppState) {
         ) { Icon(Icons.Rounded.PlayArrow, null, tint = Palette.onAccent, modifier = Modifier.size(22.dp)) }
         if (showClock) Column(Modifier.padding(start = 9.dp)) {
             Text("tuner", color = Palette.text, fontSize = 21.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.5).sp)
-            Text("LIVE & ON DEMAND", color = Palette.dim, fontSize = 8.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.6.sp)
+            Text(if (state.navigationFocused) "OK  Open" else "Back  Tabs", color = Palette.dim, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.3.sp)
         }
         Spacer(Modifier.width(if (wide) 28.dp else 16.dp))
-        Row(Modifier.focusGroup(), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        Row(Modifier.onFocusChanged { state.navigationFocused = it.hasFocus }.focusGroup(), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
             Tab.entries.forEach { t ->
                 val selected = state.tab == t
                 FocusBox(
                     onClick = {
-                        if (state.tab == t) focusManager.moveFocus(FocusDirection.Down)
+                        if (state.tab == t) {
+                            when (t) {
+                                Tab.MOVIES, Tab.SERIES -> state.restoreFocus = true
+                                Tab.STREAMING -> state.torrentioBrowse.restoreFocus = true
+                                else -> focusManager.moveFocus(FocusDirection.Down)
+                            }
+                        }
                         else { state.tab = t; state.restoreFocus = true }
                     },
-                    modifier = Modifier.semantics { this.selected = selected; contentDescription = t.title },
+                    modifier = Modifier.focusRequester(requesters.getValue(t)).semantics { this.selected = selected; contentDescription = t.title },
                     shape = RoundedCornerShape(10.dp),
                     focusedScale = 1.025f,
                     color = if (selected) Palette.accent.copy(alpha = 0.15f) else Palette.bg.copy(alpha = 0f),

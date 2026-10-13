@@ -193,13 +193,14 @@ object Repo {
 
     /** Cleans the lineup (names, duplicates, empty event slots, channels that recently failed) and publishes it. */
     private fun publishLive(catalogue: ContentPolicy.Catalogue<Channel>) {
+        val localCatalogue = LocalLineup.filterCatalogue(catalogue, prefs.localZip.value)
         val hidden = prefs.deadChannels()
         deadNow.clear(); deadNow.addAll(hidden)
-        val lineup = Cleanup.lineup(catalogue.items, catalogue.categories, hidden = hidden)
+        val lineup = Cleanup.lineup(localCatalogue.items, localCatalogue.categories, hidden = hidden)
         merged = lineup.merged
         prefs.remapChannelKeys(lineup.merged)
         val used = lineup.channels.flatMapTo(HashSet()) { it.categoryIds }
-        liveCategories.value = catalogue.categories.filter { it.id in used }
+        liveCategories.value = localCatalogue.categories.filter { it.id in used }
         channels.value = lineup.channels
     }
 
@@ -235,7 +236,7 @@ object Repo {
             val playlist = M3u.parse(f)
             val now = System.currentTimeMillis()
             val dead = prefs.deadChannels(now)
-            val parsed = ContentPolicy.live(playlist.channels, playlist.liveCategories).items
+            val parsed = LocalLineup.filterCatalogue(ContentPolicy.live(playlist.channels, playlist.liveCategories), prefs.localZip.value).items
                 .filterNot { Cleanup.isIdleEvent(it.name) || Cleanup.isOffAir(it.name, now) }
                 .sortedBy { it.key.substringAfterLast(':').toIntOrNull() ?: 0 }
             fun sid(url: String) = url.substringBefore('?').substringAfterLast('/').substringBefore('.')
