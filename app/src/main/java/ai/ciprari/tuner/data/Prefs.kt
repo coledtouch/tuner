@@ -9,6 +9,7 @@ import org.json.JSONObject
 
 /** Small persistent store: sources, favorites, resume points and a few settings. */
 class Prefs(context: Context) {
+    val addon = AddonSettings(context)
     private val sp: SharedPreferences = context.getSharedPreferences("tuner", Context.MODE_PRIVATE)
 
     private val _sources = MutableStateFlow(readSources())
@@ -107,6 +108,37 @@ class Prefs(context: Context) {
         return added
     }
 
+    /** Favorites and the last-watched channel follow a channel when its duplicates are folded into one entry. */
+    fun remapChannelKeys(merged: Map<String, String>) {
+        if (merged.isEmpty()) return
+        val favorites = _favorites.value
+        if (favorites.any { it in merged }) {
+            val set = favorites.mapTo(HashSet()) { merged[it] ?: it }
+            sp.edit().putStringSet(favKey(), set).apply()
+            _favorites.value = set
+        }
+        lastChannelKey?.let { key -> merged[key]?.let { lastChannelKey = it } }
+    }
+
+    // ---- channels that failed on every source (per source), hidden for a few days ----
+    private fun deadKey() = "dead_${_activeId.value}"
+
+    private fun readDead(): JSONObject = runCatching { JSONObject(sp.getString(deadKey(), null) ?: "{}") }.getOrDefault(JSONObject())
+
+    fun deadChannels(now: Long = System.currentTimeMillis()): Set<String> {
+        val o = readDead()
+        return o.keys().asSequence().filter { now - o.optLong(it) < DEAD_FOR_MS }.toSet()
+    }
+
+    fun markDead(keys: Collection<String>, now: Long = System.currentTimeMillis()) {
+        val o = readDead()
+        o.keys().asSequence().toList().forEach { if (now - o.optLong(it) >= DEAD_FOR_MS) o.remove(it) }
+        keys.forEach { o.put(it, now) }
+        sp.edit().putString(deadKey(), o.toString()).apply()
+    }
+
+    fun clearDead() = sp.edit().remove(deadKey()).apply()
+
     // ---- resume / continue watching (per source) ----
     private fun recentsKey() = "recents_${_activeId.value}"
 
@@ -141,4 +173,9 @@ class Prefs(context: Context) {
             )
         }
     }.getOrDefault(emptyList())
+
+    companion object {
+        /** How long a channel that failed on every source stays out of the guide before it gets another chance. */
+        const val DEAD_FOR_MS = 3 * 24 * 3600_000L
+    }
 }

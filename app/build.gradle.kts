@@ -14,6 +14,11 @@ val releaseProperties = Properties().apply {
     if (releasePropertiesFile.isFile) releasePropertiesFile.inputStream().use { load(it) }
 }
 val testJavaExecutable = providers.gradleProperty("tunerTestJavaExecutable").orNull
+val torrentNatives by configurations.creating
+val unpackTorrentNatives by tasks.registering(Sync::class) {
+    from({ torrentNatives.map { zipTree(it) } }) { include("lib/**/*.so"); eachFile { path = path.removePrefix("lib/") }; includeEmptyDirs = false }
+    into(layout.buildDirectory.dir("generated/torrentJni"))
+}
 fun signingValue(name: String): String = releaseProperties.getProperty(name)?.takeIf { it.isNotBlank() }
     ?: error("Missing $name in the external release signing properties")
 
@@ -25,8 +30,9 @@ android {
         applicationId = "ai.ciprari.tuner"
         minSdk = 23
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.1.0"
+        versionCode = 9
+        versionName = "1.3.1"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
@@ -41,6 +47,7 @@ android {
         }
     }
     buildTypes {
+        debug { signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug") }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
@@ -54,7 +61,8 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
+    sourceSets.getByName("main").jniLibs.srcDir(layout.buildDirectory.dir("generated/torrentJni"))
     testOptions {
         unitTests.isIncludeAndroidResources = true
         unitTests.all {
@@ -62,12 +70,22 @@ android {
             testJavaExecutable?.let { executable -> it.executable = executable }
             it.systemProperty("robolectric.dependency.repo.url", System.getenv("MAVEN_MIRROR") ?: "https://repo1.maven.org/maven2")
             it.maxHeapSize = "3g"
+            // Conscrypt ships no Windows-on-ARM native library; the tests don't need it.
+            it.systemProperty("robolectric.conscryptMode", "OFF")
             System.getenv("FREE_EPG")?.let { f -> it.systemProperty("free.epg", f) }
+            // -PtunerRealData=<folder of provider JSON> runs RealDataProbe against a real catalogue.
+            providers.gradleProperty("tunerRealData").orNull?.let { f -> it.systemProperty("tuner.realData", f) }
         }
     }
 }
 
 dependencies {
+    val torrentVersion = "2.0.12.9"
+    implementation("com.frostwire:jlibtorrent:$torrentVersion")
+    torrentNatives("com.frostwire:jlibtorrent-android-arm:$torrentVersion")
+    torrentNatives("com.frostwire:jlibtorrent-android-arm64:$torrentVersion")
+    torrentNatives("com.frostwire:jlibtorrent-android-x86:$torrentVersion")
+    torrentNatives("com.frostwire:jlibtorrent-android-x86_64:$torrentVersion")
     val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
     implementation(composeBom)
     implementation("androidx.compose.ui:ui")
@@ -91,7 +109,10 @@ dependencies {
     implementation("com.google.zxing:core:3.5.3")
 
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
     testImplementation("org.robolectric:robolectric:4.14.1")
     testImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
+tasks.named("preBuild") { dependsOn(unpackTorrentNatives) }

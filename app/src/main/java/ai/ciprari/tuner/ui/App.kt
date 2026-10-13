@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -14,7 +15,9 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import ai.ciprari.tuner.data.Movie
 import ai.ciprari.tuner.data.PlayRequest
 import ai.ciprari.tuner.data.Repo
@@ -23,16 +26,23 @@ import ai.ciprari.tuner.player.PlayerHolder
 
 sealed interface Screen {
     data object Home : Screen
+    data object Torrentio : Screen
     data class EditSource(val sourceId: String?) : Screen
     data class MovieDetail(val movie: Movie) : Screen
     data class SeriesDetail(val series: Series) : Screen
     data class Player(val request: PlayRequest) : Screen
 }
 
-enum class Tab(val title: String) { GUIDE("Live TV"), MOVIES("Movies"), SERIES("Series"), SEARCH("Search"), SETTINGS("Settings") }
+enum class Tab(val title: String) { GUIDE("Live TV"), MOVIES("Movies"), SERIES("Series"), STREAMING("Streaming"), SEARCH("Search"), SETTINGS("Settings") }
 
 /** Screen-independent state that has to survive navigating to a detail page or the player and back. */
 class AppState {
+    val torrentioBrowse = TorrentioBrowseState()
+    var torrentioManifest by mutableStateOf(runCatching { Repo.prefs.addon.manifest }.getOrDefault(ai.ciprari.tuner.data.AddonSettings.DEFAULT))
+    var torrentioVideoId by mutableStateOf("")
+    var torrentioSeries by mutableStateOf(false)
+    var torrentioResults by mutableStateOf<ai.ciprari.tuner.data.AddonResults?>(null)
+    var torrentioTitle by mutableStateOf("")
     val stack = mutableStateListOf<Screen>(Screen.Home)
     var tab by mutableStateOf(Tab.GUIDE)
     val guide = GuideState()
@@ -43,6 +53,8 @@ class AppState {
     fun clearRowStates() = rowStates.clear()
     var lastFocusedKey by mutableStateOf<String?>(null)
     var lastEpisodeKey by mutableStateOf<String?>(null)
+    var searchQuery by mutableStateOf("")
+    var searchFocusedKey by mutableStateOf<String?>(null)
     /** True when the current home tab should grab focus (app start, coming back from a detail page). */
     var restoreFocus by mutableStateOf(true)
 
@@ -82,21 +94,25 @@ fun App() {
                 EditSourceScreen(
                     sourceId = s.sourceId,
                     canCancel = sources.isNotEmpty(),
+                    onTorrentio = { state.push(Screen.Torrentio) },
                     onDone = {
                         if (state.stack.size > 1) state.pop() else state.replaceAll(Screen.Home)
                     },
                 )
             }
             is Screen.MovieDetail -> key(s) { MovieDetailScreen(s.movie, state) }
+            Screen.Torrentio -> TorrentioScreen(state)
             is Screen.SeriesDetail -> key(s) { SeriesDetailScreen(s.series, state) }
             is Screen.Player -> key(s) {
                 PlayerScreen(s.request, onExit = { lastChannel ->
                     // Leaving live TV with guide preview on keeps the stream running in the preview window.
-                    if (lastChannel == null || !Repo.prefs.guidePreview) PlayerHolder.stop()
+                    val returningToGuide = state.stack.getOrNull(state.stack.lastIndex - 1) == Screen.Home && state.tab == Tab.GUIDE
+                    if (lastChannel == null || !Repo.prefs.guidePreview || !returningToGuide) PlayerHolder.stop()
                     lastChannel?.let { state.guide.focusChannel(it) }
                     state.pop()
                 })
             }
         }
+        ToastHost(Modifier.align(Alignment.BottomCenter).padding(bottom = 28.dp))
     }
 }

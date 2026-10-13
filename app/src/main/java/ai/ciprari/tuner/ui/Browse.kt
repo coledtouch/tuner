@@ -148,7 +148,7 @@ fun BrowseScreen(
         when (status) {
             is LoadStatus.Loading -> LoadingMessage(status.message)
             is LoadStatus.Error -> EmptyMessage("Couldn't load your library", status.message)
-            else -> EmptyMessage(emptyTitle, "English provider labels are required. Check your playlist in Settings.")
+            else -> EmptyMessage(emptyTitle, "Add or refresh your playlist in Settings to find more to watch.")
         }
         return
     }
@@ -370,17 +370,21 @@ private fun <T> groupRows(
 internal fun eligibleMovieRecents(recents: List<Recent>, movies: List<Movie>): List<Recent> {
     val moviesById = movies.associateBy { it.id }
     return recents.mapNotNull { recent ->
-        val movie = moviesById[recent.id]?.takeIf { it.url.isNotBlank() && it.url == recent.url }
+        val movie = moviesById[recent.id]?.takeIf { it.url.isNotBlank() && (it.url == recent.url || recent.url in it.backups) }
             ?: return@mapNotNull null
         recent.copy(title = movie.name, image = movie.poster, url = movie.url)
     }
 }
 
+internal fun eligibleSeriesRecents(recents: List<Recent>, series: List<Series>): List<Recent> {
+    val currentTitles = series.map { it.name }.toHashSet()
+    return recents.filter { it.id.startsWith("e:") && it.url.isNotBlank() && it.title in currentTitles }
+}
+
 fun recentsRow(recents: List<Recent>, kindPrefix: List<String>, state: AppState): BrowseRow? {
-    // Episode recents lack a parent series id, so they cannot establish that the series is eligible.
-    // Keep them out of the library until that association can be verified.
-    if (kindPrefix.all { it == "e:" }) return null
-    val list = eligibleMovieRecents(recents, Repo.movies.value)
+    val current = if (kindPrefix.all { it == "e:" }) eligibleSeriesRecents(recents, Repo.series.value)
+        else eligibleMovieRecents(recents, Repo.movies.value)
+    val list = current
         .filter { recent -> kindPrefix.any { recent.id.startsWith(it) } }
     if (list.isEmpty()) return null
     return BrowseRow("continue", "Continue Watching", list.map { recent ->
@@ -388,7 +392,10 @@ fun recentsRow(recents: List<Recent>, kindPrefix: List<String>, state: AppState)
             key = recent.id, title = recent.title, image = recent.image,
             heroMeta = recent.subtitle,
             progress = if (recent.durationMs > 0) recent.positionMs.toFloat() / recent.durationMs else 0f,
-            onClick = { state.push(Screen.Player(PlayRequest.Vod(recent.id, recent.title, recent.subtitle, recent.image, recent.url, recent.positionMs))) },
+            onClick = {
+                val movie = Repo.movies.value.firstOrNull { it.id == recent.id && it.url == recent.url }
+                state.push(Screen.Player(PlayRequest.Vod(recent.id, recent.title, recent.subtitle, recent.image, recent.url, recent.positionMs, streamBackups = movie?.backups.orEmpty())))
+            },
         )
     })
 }
@@ -410,7 +417,7 @@ fun MoviesScreen(state: AppState) {
             addAll(groupRows("c", movies, cats, { it.categoryIds }, ::item))
         }
     }
-    BrowseScreen(state, "movies", rows, state.moviesList, status, "No English movies in this playlist")
+    BrowseScreen(state, "movies", rows, state.moviesList, status, "No movies in this playlist")
 }
 
 @Composable
@@ -418,7 +425,8 @@ fun SeriesScreen(state: AppState) {
     val series by Repo.series.collectAsState()
     val cats by Repo.seriesCategories.collectAsState()
     val status by Repo.seriesStatus.collectAsState()
-    val rows = remember(series, cats) {
+    val recents by Repo.prefs.recents.collectAsState()
+    val rows = remember(series, cats, recents) {
         fun item(series: Series) = BrowseItem(
             key = series.id, title = series.name, image = series.cover, badge = contentRating(series.rating),
             heroPlot = series.plot, heroBackdrop = series.backdrop,
@@ -426,9 +434,10 @@ fun SeriesScreen(state: AppState) {
             onClick = { state.push(Screen.SeriesDetail(series)) },
         )
         buildList {
+            recentsRow(recents, listOf("e:"), state)?.let { add(it) }
             if (series.any { it.added > 0 }) add(BrowseRow("recent", "Recently Updated", series.sortedByDescending { it.added }.take(40).map(::item)))
             addAll(groupRows("c", series, cats, { it.categoryIds }, ::item))
         }
     }
-    BrowseScreen(state, "series", rows, state.seriesList, status, "No English series in this playlist")
+    BrowseScreen(state, "series", rows, state.seriesList, status, "No series in this playlist")
 }

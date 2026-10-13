@@ -2,7 +2,9 @@ package ai.ciprari.tuner
 
 import ai.ciprari.tuner.data.Movie
 import ai.ciprari.tuner.data.Recent
+import ai.ciprari.tuner.data.Series
 import ai.ciprari.tuner.ui.eligibleMovieRecents
+import ai.ciprari.tuner.ui.eligibleSeriesRecents
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -48,5 +50,21 @@ class BrowseRecentTest {
 
     @Test fun blankUrlIsNotAnEligiblePlaybackTarget() {
         assertTrue(eligibleMovieRecents(listOf(recent("m:1", "")), listOf(movie("m:1", ""))).isEmpty())
+    }
+
+    @Test fun knownBackupKeepsProgressAndUsesTheCurrentPrimaryUrl() {
+        val allowed = movie("m:1", "https://current.example/movie/1.mp4")
+            .copy(backups = listOf("https://backup.example/movie/1.mp4"))
+        val saved = recent(allowed.id, allowed.backups.single())
+        val result = eligibleMovieRecents(listOf(saved), listOf(allowed)).single()
+        assertEquals(allowed.url, result.url)
+        assertEquals(saved.positionMs, result.positionMs)
+    }
+
+    @Test fun seriesHistoryIsAvailableForAnyCurrentSeriesTitle() {
+        val show = Series("1", "Foreign Series", null, null, null, "category", null, null, null)
+        val saved = recent("e:1", "https://provider.example/series/1.mp4").copy(title = show.name)
+        val stale = saved.copy(id = "e:2", title = "Removed Series")
+        assertEquals(listOf(saved), eligibleSeriesRecents(listOf(saved, stale), listOf(show)))
     }
 }

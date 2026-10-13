@@ -37,6 +37,8 @@ import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.SkipNext
+import androidx.compose.material.icons.rounded.Star
+import androidx.compose.material.icons.rounded.StarBorder
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -55,6 +57,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -67,9 +70,13 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.media3.common.C
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
@@ -94,6 +101,7 @@ fun VideoSurface(modifier: Modifier, texture: Boolean) {
             ) as PlayerView).apply { player = PlayerHolder.player }
         },
         modifier = modifier,
+        update = { view -> if (view.player !== PlayerHolder.player) view.player = PlayerHolder.player },
         onRelease = { it.player = null },
     )
 }
@@ -156,27 +164,67 @@ private fun LivePlayer(req: PlayRequest.Live, onExit: (Channel?) -> Unit) {
     var panelOpen by remember { mutableStateOf(false) }
     var digits by remember { mutableStateOf("") }
     var firstTune by remember { mutableStateOf(true) }
+    // True while the viewer is flipping quickly (held key or rapid taps).
+    var flipping by remember { mutableStateOf(false) }
+    var lastZapAt by remember { mutableLongStateOf(0L) }
+    // Direction of the last up/down press, so a dead channel is skipped the way the viewer was going.
+    var step by remember { mutableIntStateOf(1) }
+    var skips by remember { mutableIntStateOf(0) }
+    var favoriteLongPress by remember { mutableStateOf(false) }
+    var favoriteNotice by remember { mutableStateOf<String?>(null) }
+    var favoriteNoticeTick by remember { mutableIntStateOf(0) }
     val rootFocus = remember { FocusRequester() }
     val ui = rememberPlaybackUi()
     val error by PlayerHolder.error.collectAsState()
+    val unavailable by PlayerHolder.unavailable.collectAsState()
+    val favorites by Repo.prefs.favorites.collectAsState()
     val epgVersion by Repo.epgVersion.collectAsState()
     val now = rememberNow(15_000)
 
     fun showBanner() { bannerVisible = true; bannerTick++ }
-    fun zap(to: Int) {
+    fun toggleFavorite(c: Channel) {
+        val added = Repo.prefs.toggleFavorite(c.key)
+        favoriteNotice = if (added) "${c.name} added to Favorites" else "${c.name} removed from Favorites"
+        favoriteNoticeTick++
+        showBanner()
+    }
+    fun zap(to: Int, direction: Int = 0) {
         val n = lineup.size
-        val target = ((to % n) + n) % n
-        if (target != index) { previous = index; index = target }
+        if (direction != 0) step = direction
+        var target = ((to % n) + n) % n
+        // Channels that just failed are skipped, the way a cable box skips channels you don't get.
+        var guard = 0
+        while (target != index && Repo.isDead(lineup[target].key) && guard++ < n) target = (((target + step) % n) + n) % n
+        if (target != index) {
+            val t = android.os.SystemClock.uptimeMillis()
+            flipping = t - lastZapAt < 450
+            lastZapAt = t
+            previous = index; index = target
+            // Hang up on the old channel now. Single-connection plans only accept the next stream
+            // once the provider has let go of this one, so the sooner it closes the faster the zap.
+            PlayerHolder.releaseForZap()
+        }
         showBanner()
     }
 
-    // Tune. Zapping is debounced so holding up/down flips through banners without opening every stream.
+    // Tune. A single press tunes almost at once; while flipping quickly only the banner moves, and the
+    // stream opens when the viewer lands on a channel.
     LaunchedEffect(channel.key) {
-        if (!firstTune) delay(320)
+        if (!firstTune) delay(if (flipping) 450 else 90)
         firstTune = false
-        PlayerHolder.play(channel.url, live = true)
+        PlayerHolder.play(channel.url, live = true, backups = channel.backups, key = channel.key)
         Repo.prefs.lastChannelKey = channel.key
     }
+    // The channel failed on every copy: say so briefly, then move on in the direction the viewer was flipping.
+    LaunchedEffect(unavailable) {
+        if (unavailable == null || unavailable != channel.key || skips >= 5 || lineup.size < 2) return@LaunchedEffect
+        Toasts.show("${channel.name} isn't working right now. Skipping it.")
+        delay(1500)
+        skips++
+        zap(index + step)
+    }
+    LaunchedEffect(ui.playing) { if (ui.playing) skips = 0 }
+    LaunchedEffect(favoriteNoticeTick) { if (favoriteNotice != null) { delay(2200); favoriteNotice = null } }
     LaunchedEffect(bannerTick, panelOpen) { delay(6000); if (!panelOpen) bannerVisible = false }
     LaunchedEffect(panelOpen) { if (!panelOpen) { delay(30); runCatching { rootFocus.requestFocus() } } }
     LaunchedEffect(digits) {
@@ -195,15 +243,27 @@ private fun LivePlayer(req: PlayRequest.Live, onExit: (Channel?) -> Unit) {
         Modifier.fillMaxSize().background(Color.Black)
             .focusRequester(rootFocus)
             .onPreviewKeyEvent { e ->
-                if (panelOpen || e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                when (val code = e.key.nativeKeyCode) {
-                    AndroidKeyEvent.KEYCODE_DPAD_UP, AndroidKeyEvent.KEYCODE_CHANNEL_UP, AndroidKeyEvent.KEYCODE_PAGE_UP -> { zap(index + 1); true }
-                    AndroidKeyEvent.KEYCODE_DPAD_DOWN, AndroidKeyEvent.KEYCODE_CHANNEL_DOWN, AndroidKeyEvent.KEYCODE_PAGE_DOWN -> { zap(index - 1); true }
-                    AndroidKeyEvent.KEYCODE_DPAD_CENTER, AndroidKeyEvent.KEYCODE_ENTER -> {
-                        if (error != null) PlayerHolder.retry()
-                        else if (bannerVisible) panelOpen = true else showBanner()
-                        true
+                if (panelOpen) return@onPreviewKeyEvent false
+                if (e.key.nativeKeyCode in listOf(AndroidKeyEvent.KEYCODE_DPAD_CENTER, AndroidKeyEvent.KEYCODE_ENTER)) {
+                    if (e.type == KeyEventType.KeyDown) {
+                        if (e.nativeKeyEvent.repeatCount == 0) favoriteLongPress = false
+                        if (e.nativeKeyEvent.isLongPress && !favoriteLongPress) {
+                            favoriteLongPress = true
+                            toggleFavorite(channel)
+                        }
+                    } else if (e.type == KeyEventType.KeyUp) {
+                        if (!favoriteLongPress) {
+                            if (error != null) PlayerHolder.retry()
+                            else if (bannerVisible) panelOpen = true else showBanner()
+                        }
+                        favoriteLongPress = false
                     }
+                    return@onPreviewKeyEvent true
+                }
+                if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when (val code = e.key.nativeKeyCode) {
+                    AndroidKeyEvent.KEYCODE_DPAD_UP, AndroidKeyEvent.KEYCODE_CHANNEL_UP, AndroidKeyEvent.KEYCODE_PAGE_UP -> { zap(index + 1, 1); true }
+                    AndroidKeyEvent.KEYCODE_DPAD_DOWN, AndroidKeyEvent.KEYCODE_CHANNEL_DOWN, AndroidKeyEvent.KEYCODE_PAGE_DOWN -> { zap(index - 1, -1); true }
                     AndroidKeyEvent.KEYCODE_DPAD_LEFT, AndroidKeyEvent.KEYCODE_MENU -> { panelOpen = true; true }
                     AndroidKeyEvent.KEYCODE_DPAD_RIGHT, AndroidKeyEvent.KEYCODE_INFO -> { showBanner(); true }
                     AndroidKeyEvent.KEYCODE_LAST_CHANNEL -> { zap(previous); true }
@@ -218,13 +278,14 @@ private fun LivePlayer(req: PlayRequest.Live, onExit: (Channel?) -> Unit) {
             .focusable(),
     ) {
         VideoSurface(Modifier.fillMaxSize(), texture = false)
-        if (ui.buffering && error == null) {
+        // Live has no pause, so "not playing yet" means tuning: show the spinner from the first press.
+        if ((ui.buffering || !ui.playing) && error == null) {
             CircularProgressIndicator(color = Color.White, strokeWidth = 3.dp, modifier = Modifier.align(Alignment.Center).size(44.dp))
         }
         error?.let { ErrorCard(it, "Press OK to retry, or change channel", Modifier.align(Alignment.Center)) }
 
         AnimatedVisibility(bannerVisible && !panelOpen, Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = fadeOut()) {
-            androidx.compose.runtime.key(epgVersion) { LiveBanner(channel, now) }
+            androidx.compose.runtime.key(epgVersion) { LiveBanner(channel, now, channel.key in favorites, onFavorite = { toggleFavorite(channel) }) }
         }
         if (digits.isNotEmpty()) {
             Text(
@@ -237,7 +298,12 @@ private fun LivePlayer(req: PlayRequest.Live, onExit: (Channel?) -> Unit) {
             panelOpen, Modifier.align(Alignment.CenterStart),
             enter = slideInHorizontally { -it } + fadeIn(), exit = slideOutHorizontally { -it } + fadeOut(),
         ) {
-            ChannelPanel(lineup, index, now, epgVersion, onDismiss = { panelOpen = false }, onPick = { i -> zap(i); panelOpen = false })
+            ChannelPanel(lineup, index, now, epgVersion, favorites, onFavorite = ::toggleFavorite, onDismiss = { panelOpen = false }, onPick = { i -> zap(i); panelOpen = false })
+        }
+        favoriteNotice?.let { message ->
+            Text(message, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 22.dp, start = 24.dp, end = 24.dp)
+                    .clip(RoundedCornerShape(50)).background(Color(0xFF142338).copy(alpha = 0.95f)).padding(horizontal = 18.dp, vertical = 10.dp))
         }
     }
     LaunchedEffect(Unit) { runCatching { rootFocus.requestFocus() } }
@@ -250,7 +316,7 @@ private fun nowNext(c: Channel, now: Long): Pair<Program?, Program?> {
 }
 
 @Composable
-private fun LiveBanner(c: Channel, now: Long) {
+private fun LiveBanner(c: Channel, now: Long, favorite: Boolean, onFavorite: () -> Unit) {
     val (cur, next) = nowNext(c, now)
     BoxWithConstraints(
         Modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.92f))))
@@ -268,7 +334,8 @@ private fun LiveBanner(c: Channel, now: Long) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text("LIVE", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold,
                             modifier = Modifier.clip(RoundedCornerShape(4.dp)).background(Palette.live).padding(horizontal = 7.dp, vertical = 3.dp))
-                        Text(c.name, color = Color.White.copy(alpha = 0.8f), fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(c.name, color = Color.White.copy(alpha = 0.8f), fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        FavoriteAction(c, favorite, onFavorite, compact = compact)
                     }
                     Text(
                         cur?.title?.ifBlank { null } ?: c.name, color = Color.White, fontSize = if (compact) 22.sp else 27.sp, fontWeight = FontWeight.Bold,
@@ -295,7 +362,7 @@ private fun LiveBanner(c: Channel, now: Long) {
                 }
             }
             Text(
-                "↑ ↓  Change channel     OK / ←  Channels     Back  Return", color = Color.White.copy(alpha = 0.62f), fontSize = 11.sp,
+                "↑ ↓  Change channel     OK / ←  Channels     Hold OK  Favorite     Back  Return", color = Color.White.copy(alpha = 0.62f), fontSize = 11.sp,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 16.dp).align(Alignment.End),
             )
         }
@@ -303,7 +370,7 @@ private fun LiveBanner(c: Channel, now: Long) {
 }
 
 @Composable
-private fun ChannelPanel(lineup: List<Channel>, current: Int, now: Long, epgVersion: Int, onDismiss: () -> Unit, onPick: (Int) -> Unit) {
+private fun ChannelPanel(lineup: List<Channel>, current: Int, now: Long, epgVersion: Int, favorites: Set<String>, onFavorite: (Channel) -> Unit, onDismiss: () -> Unit, onPick: (Int) -> Unit) {
     val list = rememberLazyListState(initialFirstVisibleItemIndex = (current - 2).coerceAtLeast(0))
     val currentFocus = remember { FocusRequester() }
     LaunchedEffect(Unit) { delay(60); runCatching { currentFocus.requestFocus() } }
@@ -327,6 +394,7 @@ private fun ChannelPanel(lineup: List<Channel>, current: Int, now: Long, epgVers
                 val cur = remember(c.key, now, epgVersion) { Repo.programsFor(c)?.firstOrNull { it.isOnAt(now) } }
                 FocusBox(
                     onClick = { onPick(i) },
+                    onLongClick = { onFavorite(c) },
                     modifier = Modifier.fillMaxWidth().height(66.dp).then(if (i == current) Modifier.focusRequester(currentFocus) else Modifier),
                     shape = RoundedCornerShape(10.dp),
                     color = if (i == current) Color.White.copy(alpha = 0.12f) else Color.Transparent,
@@ -341,13 +409,31 @@ private fun ChannelPanel(lineup: List<Channel>, current: Int, now: Long, epgVers
                             Text(cur?.title?.ifBlank { null } ?: "Live TV", color = fg.copy(alpha = 0.68f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp))
                         }
                         if (i == current) Icon(Icons.Rounded.PlayArrow, "Currently watching", tint = if (f) fg else Palette.accent, modifier = Modifier.padding(start = 8.dp).size(18.dp))
+                        FavoriteAction(c, c.key in favorites, onFavorite = { onFavorite(c) }, compact = true, focusedParent = f)
                     }
                 }
             }
         }
-        Text("OK  Watch channel     → / Back  Close", color = Color.White.copy(alpha = 0.65f), fontSize = 11.sp,
+        Text("OK Watch  ·  Hold OK Favorite  ·  Back Close", color = Color.White.copy(alpha = 0.65f), fontSize = 11.sp,
             modifier = Modifier.padding(horizontal = 24.dp, vertical = 18.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
+    }
+}
+
+@Composable
+private fun FavoriteAction(c: Channel, favorite: Boolean, onFavorite: () -> Unit, compact: Boolean, focusedParent: Boolean = false) {
+    FocusBox(
+        onClick = onFavorite, color = Color.Transparent, focusedColor = Palette.focus, ring = false, focusedScale = 1f,
+        modifier = Modifier.focusProperties { canFocus = false }.semantics {
+            contentDescription = if (favorite) "Remove ${c.name} from Favorites" else "Add ${c.name} to Favorites"
+        },
+        shape = RoundedCornerShape(50),
+    ) { focused ->
+        val tint = if (focused || focusedParent) Palette.onFocus else if (favorite) Palette.accent else Color.White.copy(alpha = 0.76f)
+        Row(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(if (favorite) Icons.Rounded.Star else Icons.Rounded.StarBorder, null, tint = tint, modifier = Modifier.size(18.dp))
+            if (!compact) Text(if (favorite) "Saved" else "Favorite", color = tint, fontSize = 11.sp, modifier = Modifier.padding(start = 5.dp))
+        }
     }
 }
 
@@ -367,14 +453,17 @@ private fun VodPlayer(req: PlayRequest.Vod, onExit: () -> Unit) {
     val ui = rememberPlaybackUi()
     val error by PlayerHolder.error.collectAsState()
     val player = PlayerHolder.player
+    val torrentStatus by ai.ciprari.tuner.player.TorrentEngine.status.collectAsState()
 
     fun showControls() { controlsVisible = true; controlsTick++ }
     fun save() {
         val pos = player.currentPosition
         val dur = player.duration.takeIf { it != C.TIME_UNSET } ?: 0
-        if (pos > 0) Repo.prefs.saveProgress(
-            Recent(current.resumeId, current.title, current.subtitle, current.image, current.url, pos, dur, System.currentTimeMillis()),
-        )
+        if (pos > 0) {
+            Repo.prefs.saveProgress(
+                Recent(current.resumeId, current.title, current.subtitle, current.image, current.url, pos, dur, System.currentTimeMillis()),
+            )
+        }
     }
     fun seekBy(ms: Long) {
         val dur = player.duration.takeIf { it != C.TIME_UNSET } ?: Long.MAX_VALUE
@@ -389,7 +478,7 @@ private fun VodPlayer(req: PlayRequest.Vod, onExit: () -> Unit) {
         current = next
     }
 
-    LaunchedEffect(current.url) { PlayerHolder.play(current.url, live = false, startMs = current.startMs) }
+    LaunchedEffect(current.url) { PlayerHolder.play(current.url, live = false, startMs = current.startMs, backups = current.streamBackups) }
     LaunchedEffect(Unit) { while (true) { delay(10_000); save() } }
     DisposableEffect(Unit) { onDispose { save() } }
     LaunchedEffect(ui.ended) { if (ui.ended > 0) playNext() }
@@ -448,6 +537,10 @@ private fun VodPlayer(req: PlayRequest.Vod, onExit: () -> Unit) {
         val compact = maxWidth < 760.dp || maxHeight < 440.dp
         val edge = if (compact) 24.dp else 40.dp
         VideoSurface(Modifier.fillMaxSize(), texture = false)
+        if (current.url.startsWith("torrent:") && error == null && ui.buffering) {
+            Text(torrentStatus ?: "Finding torrent peers...", color = Color.White, fontSize = 15.sp,
+                modifier = Modifier.align(Alignment.Center).padding(top = 100.dp, start = 24.dp, end = 24.dp))
+        }
         if (ui.buffering && error == null) {
             CircularProgressIndicator(color = Color.White, strokeWidth = 3.dp, modifier = Modifier.align(Alignment.Center).size(44.dp))
         }
@@ -556,6 +649,7 @@ private fun TrackDialog(type: Int, version: Int, onClose: () -> Unit) {
     val selectedIndex = options.indexOfFirst { it.selected }.coerceAtLeast(0)
     val list = rememberLazyListState(initialFirstVisibleItemIndex = selectedIndex)
     LaunchedEffect(type) { delay(40); runCatching { if (options.isEmpty()) closeFocus.requestFocus() else selectedFocus.requestFocus() } }
+    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
     BoxWithConstraints(Modifier.fillMaxSize().dimBackground(0.62f), contentAlignment = Alignment.CenterEnd) {
         Column(
             Modifier.width((maxWidth * 0.56f).coerceAtMost(380.dp)).fillMaxHeight().background(Palette.surface).padding(24.dp),
@@ -585,6 +679,7 @@ private fun TrackDialog(type: Int, version: Int, onClose: () -> Unit) {
             }
             PillButton("Done", onClose, Modifier.focusRequester(closeFocus).padding(top = 12.dp))
         }
+    }
     }
 }
 

@@ -31,6 +31,8 @@ data class Channel(
     val categoryIds: List<String> = listOf(categoryId),
     val country: String? = null,
     val language: String? = null,
+    /** Other copies of this channel from the provider, tried in order when [url] doesn't play. */
+    val backups: List<String> = emptyList(),
 )
 
 data class Movie(
@@ -44,6 +46,8 @@ data class Movie(
     val categoryIds: List<String> = listOf(categoryId),
     val country: String? = null,
     val language: String? = null,
+    /** Other provider uploads of this film, tried if the primary upload cannot play. */
+    val backups: List<String> = emptyList(),
 )
 
 data class Series(
@@ -116,6 +120,8 @@ sealed interface PlayRequest {
         val url: String,
         val startMs: Long,
         val queue: List<Vod> = emptyList(),
+        val requireEnglishAudio: Boolean = false,
+        val streamBackups: List<String> = emptyList(),
     ) : PlayRequest
 }
 

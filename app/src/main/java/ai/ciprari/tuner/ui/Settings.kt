@@ -57,6 +57,7 @@ fun SettingsScreen(state: AppState) {
     val channels by Repo.channels.collectAsState()
     val movies by Repo.movies.collectAsState()
     val series by Repo.series.collectAsState()
+    val favorites by Repo.prefs.favorites.collectAsState()
     val epgStatus by Repo.epgStatus.collectAsState()
     var sheetFor by remember { mutableStateOf<Source?>(null) }
     var confirmDelete by remember { mutableStateOf<Source?>(null) }
@@ -67,7 +68,7 @@ fun SettingsScreen(state: AppState) {
     val first = remember { FocusRequester() }
 
     LaunchedEffect(state.restoreFocus) {
-        if (state.restoreFocus) { delay(60); runCatching { first.requestFocus() }; state.restoreFocus = false }
+        if (state.restoreFocus && requestAttachedFocus(first)) state.restoreFocus = false
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -89,14 +90,23 @@ fun SettingsScreen(state: AppState) {
                 )
             }
             item {
-                SettingRow("Add a playlist", "Xtream Codes login or M3U link", icon = true, onClick = { state.push(Screen.EditSource(null)) })
+                SettingRow("Add a playlist", "Xtream Codes login or M3U link", icon = true,
+                    modifier = if (sources.isEmpty()) Modifier.focusRequester(first) else Modifier,
+                    onClick = { state.push(Screen.EditSource(null)) })
             }
 
             header("Appearance")
             item {
+                SettingRow("Favorite channels", "${favorites.size} saved. Open your Favorites guide.", onClick = {
+                    state.guide.category = CAT_FAV
+                    state.tab = Tab.GUIDE
+                    state.restoreFocus = true
+                })
+            }
+            item {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp)) {
-                    Text("USA / English content", color = Palette.accent, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                    Text("U.S. English channels and English movies and series. Entries without a reliable provider country or language label are hidden.", color = Palette.dim, fontSize = 13.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 5.dp))
+                    Text("Your library", color = Palette.accent, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    Text("U.S. channels and your full movie and series library. All audio languages are available.", color = Palette.dim, fontSize = 13.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 5.dp))
                 }
             }
             item {
@@ -104,6 +114,9 @@ fun SettingsScreen(state: AppState) {
             }
 
             header("Playback")
+            item {
+                SettingRow("Torrentio", "Free torrent playback or your debrid account", onClick = { state.push(Screen.Torrentio) })
+            }
             item(key = "fmt$rev") {
                 val ts = Repo.prefs.liveFormat == "ts"
                 SettingRow(
@@ -154,8 +167,14 @@ fun SettingsScreen(state: AppState) {
                 )
             }
             item {
+                SettingRow(
+                    "Bring back hidden channels", "Channels that failed to play are hidden for 3 days, then tried again. This shows them now.",
+                    onClick = { Repo.restoreHiddenChannels(); Toasts.show("Hidden channels restored") },
+                )
+            }
+            item {
                 Text(
-                    "Tuner 1.0  ·  Hold OK on a guide channel to favorite it  ·  Number keys tune directly",
+                    "Tuner ${ai.ciprari.tuner.BuildConfig.VERSION_NAME}  ·  Hold OK on a guide channel to favorite it  ·  Number keys tune directly",
                     color = Palette.faint, fontSize = 12.sp, modifier = Modifier.padding(top = 18.dp),
                 )
             }

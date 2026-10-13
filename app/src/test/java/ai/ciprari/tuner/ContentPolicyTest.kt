@@ -33,10 +33,10 @@ class ContentPolicyTest {
         Series(name, name, null, null, null, ids.firstOrNull().orEmpty(), null, null, null, categoryIds = ids, country = country, language = language)
     private fun temp(text: String): File = File.createTempFile("tuner-policy", ".txt").apply { writeText(text); deleteOnExit() }
 
-    @Test fun unknownContentAndOrdinaryLatinTitlesStayHidden() {
+    @Test fun unknownLiveCountryStaysHiddenButVodDoesNotNeedLanguageEvidence() {
         assertTrue(ContentPolicy.live(listOf(channel()), categories).items.isEmpty())
-        assertTrue(ContentPolicy.movies(listOf(movie("The English Patient"), movie("Us (2019)"), movie("The Last of Us: Part One")), categories).items.isEmpty())
-        assertTrue(ContentPolicy.series(listOf(series("English Teacher")), categories).items.isEmpty())
+        assertEquals(3, ContentPolicy.movies(listOf(movie("The English Patient"), movie("Us (2019)"), movie("The Last of Us: Part One")), categories).items.size)
+        assertEquals(1, ContentPolicy.series(listOf(series("English Teacher")), categories).items.size)
     }
 
     @Test fun liveRequiresUsRatherThanEnglishAlone() {
@@ -67,19 +67,19 @@ class ContentPolicyTest {
             channel("Foreign EPG", listOf("us"), epg = "bbc.uk"), channel("Conflicting language", listOf("us"), language = "en;spa"),
             channel("Conflicting country", listOf("us"), country = "US;GB"),
         )
-        assertTrue(ContentPolicy.live(items, categories).items.isEmpty())
+        assertEquals(listOf("CNN Español", "Conflicting language"), ContentPolicy.live(items, categories).items.map { it.name })
     }
 
-    @Test fun spanishUsNetworksNeverEnterTheGuide() {
+    @Test fun spanishUsNetworksAreAvailableWithoutLanguageRestrictions() {
         val names = listOf("Telemundo52", "Univisión", "UniMás", "Galavision", "ESPN Deportes", "FOX Deportes", "Universo", "TUDN", "Estrella TV")
-        assertTrue(ContentPolicy.live(names.map { channel(it, listOf("us"), country = "US") }, categories).items.isEmpty())
+        assertEquals(names, ContentPolicy.live(names.map { channel(it, listOf("us"), country = "US") }, categories).items.map { it.name })
     }
 
     @Test fun mixedCategoryMembershipsKeepOnlySafeCategories() {
         val result = ContentPolicy.live(listOf(channel(ids = listOf("uk", "us", "es", "genre"))), categories)
-        assertEquals(listOf("us", "genre"), result.items.single().categoryIds)
+        assertEquals(listOf("us", "es", "genre"), result.items.single().categoryIds)
         assertEquals("us", result.items.single().categoryId)
-        assertEquals(setOf("us", "genre"), result.categories.map { it.id }.toSet())
+        assertEquals(setOf("us", "es", "genre"), result.categories.map { it.id }.toSet())
     }
 
     @Test fun lowerCaseForeignCategoryMembershipCannotLeakFromMixedLists() {
@@ -90,18 +90,18 @@ class ContentPolicyTest {
     }
 
     @Test fun safeMetadataGetsFallbackWhenEveryCategoryIsForeign() {
-        val result = ContentPolicy.live(listOf(channel(ids = listOf("uk", "es"), country = "US", language = "English")), categories)
-        assertEquals("USA · English", result.categories.single().name)
+        val result = ContentPolicy.live(listOf(channel(ids = listOf("uk"), country = "US", language = "English")), categories)
+        assertEquals("USA", result.categories.single().name)
         assertEquals(result.categories.single().id, result.items.single().categoryId)
     }
 
-    @Test fun englishVodIncludesUkButExcludesConflictingLanguage() {
+    @Test fun vodIncludesForeignAndUnknownLanguagesAndCountries() {
         val items = listOf(
             movie("English UK movie", country = "GB", language = "eng"), movie("Provider English label", listOf("uken")),
             movie("US provider movie", listOf("us")), movie("Spanish movie", listOf("en"), language = "Spanish"),
             movie("Unknown-language UK movie", listOf("uk")), movie("[ES] Dubbed movie", listOf("en")),
         )
-        assertEquals(listOf("English UK movie", "Provider English label", "US provider movie"), ContentPolicy.movies(items, categories).items.map { it.name })
+        assertEquals(items.map { it.name }, ContentPolicy.movies(items, categories).items.map { it.name })
     }
 
     @Test fun markedEnglishVodLabelsWorkWithoutGuessingFromTitle() {
@@ -109,16 +109,16 @@ class ContentPolicyTest {
         assertEquals(4, ContentPolicy.movies(items, categories).items.size)
     }
 
-    @Test fun seriesUsesTheSameEnglishPolicyAndPrunesForeignCategories() {
+    @Test fun seriesRetainsAllLanguagesAndCategories() {
         val result = ContentPolicy.series(listOf(series(ids = listOf("es", "uk", "en", "genre")), series("Spanish series", listOf("en"), language = "es")), categories)
-        assertEquals(1, result.items.size)
-        assertEquals(listOf("en", "genre"), result.items.single().categoryIds)
-        assertEquals(setOf("en", "genre"), result.categories.map { it.id }.toSet())
+        assertEquals(2, result.items.size)
+        assertEquals(listOf("es", "uk", "en", "genre"), result.items.first().categoryIds)
+        assertEquals(setOf("es", "uk", "en", "genre"), result.categories.map { it.id }.toSet())
     }
 
-    @Test fun metadataUnknownLanguageIsHiddenEvenInEnglishCategory() {
-        assertTrue(ContentPolicy.movies(listOf(movie(ids = listOf("en"), language = "und")), categories).items.isEmpty())
-        assertTrue(ContentPolicy.live(listOf(channel(ids = listOf("us"), language = "unknown")), categories).items.isEmpty())
+    @Test fun unknownAudioLanguageDoesNotHideTitlesOrUsChannels() {
+        assertEquals(1, ContentPolicy.movies(listOf(movie(ids = listOf("en"), language = "und")), categories).items.size)
+        assertEquals(1, ContentPolicy.live(listOf(channel(ids = listOf("us"), language = "unknown")), categories).items.size)
     }
 
     @Test fun trendingPolicyCannotAdmitUnknownOrForeignFeeds() {
@@ -137,7 +137,7 @@ http://example/movie/3.mp4
 """))
         assertEquals("US", parsed.channels.first().country)
         assertEquals("en-US", parsed.channels.first().language)
-        assertEquals(listOf("CNN"), ContentPolicy.live(parsed.channels, parsed.liveCategories).items.map { it.name })
+        assertEquals(listOf("CNN", "Another feed"), ContentPolicy.live(parsed.channels, parsed.liveCategories).items.map { it.name })
         assertEquals(1, ContentPolicy.movies(parsed.movies, parsed.movieCategories).items.size)
     }
 
@@ -151,6 +151,34 @@ http://example/movie/3.mp4
         assertEquals("US;GB", parsed.first().country)
         assertEquals(listOf("NBC"), ContentPolicy.live(parsed, categories).items.map { it.name })
         val movies = x.parseMovies(temp("""[{"stream_id":1,"name":"A Movie","category_id":"en","original_language":"en","audio_language":"es"}]"""))
-        assertTrue(ContentPolicy.movies(movies, categories).items.isEmpty())
+        assertEquals(1, ContentPolicy.movies(movies, categories).items.size)
+    }
+
+    @Test fun genreOnlyLibrariesShowAllTitlesIncludingMarkedForeign() {
+        // mybunny-style: every movie category is a genre, so no title carries a language label.
+        val genres = listOf(Category("1", "Action"), Category("2", "Sci-Fi"), Category("3", "TV Movie"), Category("4", "Reality-TV"))
+        val movies = listOf(
+            movie("Grafted (2024)", listOf("1")), movie("Invisibles FRENCH (2025)", listOf("2")),
+            movie("Los Domingos (2025)", listOf("3")), movie("Spanish movie", listOf("4"), language = "es"),
+            movie("Dune: Part Two (2024)", listOf("2")),
+        )
+        assertEquals(movies.map { it.name }, ContentPolicy.movies(movies, genres).items.map { it.name })
+        val shows = listOf(series("NCIS: Los Angeles", listOf("1")), series("Yoroiden Samurai Troopers E17 FRENCH", listOf("1")))
+        assertEquals(shows.map { it.name }, ContentPolicy.series(shows, genres).items.map { it.name })
+    }
+
+    @Test fun tvInCategoryNamesIsNotTuvalu() {
+        val cats = listOf(Category("t", "Tubi TV (USA)"), Category("r", "US Roku & Free TV"))
+        val result = ContentPolicy.live(listOf(channel("A", listOf("t")), channel("B", listOf("r"))), cats)
+        assertEquals(listOf(listOf("t"), listOf("r")), result.items.map { it.categoryIds })
+    }
+
+    @Test fun streamingServiceLabelsCarryTheirCountry() {
+        val cats = listOf(Category("us", "United States"))
+        val items = listOf(
+            channel("(PLUTO USA) Frasier", listOf("us")), channel("(PLUTO Denmark) Frasier", listOf("us")),
+            channel("(PLUTO Latin) Novelas", listOf("us")), channel("The Walking Dead en español", listOf("us")),
+        )
+        assertEquals(listOf("(PLUTO USA) Frasier", "(PLUTO Latin) Novelas", "The Walking Dead en español"), ContentPolicy.live(items, cats).items.map { it.name })
     }
 }

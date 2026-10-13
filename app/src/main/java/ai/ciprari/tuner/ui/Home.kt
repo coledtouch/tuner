@@ -26,6 +26,7 @@ import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material.icons.rounded.Tv
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -72,12 +73,12 @@ fun HomeScreen(state: AppState) {
                     Tab.GUIDE -> GuideScreen(state)
                     Tab.MOVIES -> MoviesScreen(state)
                     Tab.SERIES -> SeriesScreen(state)
+                    Tab.STREAMING -> TorrentioScreen(state)
                     Tab.SEARCH -> SearchScreen(state)
                     Tab.SETTINGS -> SettingsScreen(state)
                 }
             }
         }
-        ToastHost(Modifier.align(Alignment.BottomCenter).padding(bottom = 28.dp))
     }
 }
 
@@ -106,7 +107,7 @@ private fun TopBar(state: AppState) {
         ) { Icon(Icons.Rounded.PlayArrow, null, tint = Palette.onAccent, modifier = Modifier.size(22.dp)) }
         if (showClock) Column(Modifier.padding(start = 9.dp)) {
             Text("tuner", color = Palette.text, fontSize = 21.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.5).sp)
-            Text("USA / ENGLISH", color = Palette.dim, fontSize = 8.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.6.sp)
+            Text("LIVE & ON DEMAND", color = Palette.dim, fontSize = 8.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.6.sp)
         }
         Spacer(Modifier.width(if (wide) 28.dp else 16.dp))
         Row(Modifier.focusGroup(), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -130,10 +131,11 @@ private fun TopBar(state: AppState) {
                         Tab.GUIDE -> Icons.Rounded.LiveTv
                         Tab.MOVIES -> Icons.Rounded.Movie
                         Tab.SERIES -> Icons.Rounded.Tv
+                        Tab.STREAMING -> Icons.Rounded.Cloud
                         Tab.SEARCH -> Icons.Rounded.Search
                         Tab.SETTINGS -> Icons.Rounded.Settings
                     }, null, tint = c, modifier = Modifier.size(18.dp))
-                    if (wide || t in listOf(Tab.GUIDE, Tab.MOVIES, Tab.SERIES)) {
+                    if (wide || t in listOf(Tab.GUIDE, Tab.MOVIES, Tab.SERIES, Tab.STREAMING)) {
                     Text(
                         t.title,
                         color = c,
@@ -156,8 +158,9 @@ private fun TopBar(state: AppState) {
     }
 }
 
+/** Shown over every screen, the player included, so "Skipping a dead channel" is seen while watching. */
 @Composable
-private fun ToastHost(modifier: Modifier) {
+internal fun ToastHost(modifier: Modifier) {
     var visible by remember { mutableStateOf(false) }
     LaunchedEffect(Toasts.id) {
         if (Toasts.message == null) return@LaunchedEffect

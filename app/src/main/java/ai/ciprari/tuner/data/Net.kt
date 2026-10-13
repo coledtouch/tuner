@@ -3,9 +3,14 @@ package ai.ciprari.tuner.data
 import android.util.JsonReader
 import android.util.JsonToken
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.IOException
@@ -13,6 +18,8 @@ import java.io.InputStream
 import java.io.InputStreamReader
 import java.util.concurrent.TimeUnit
 import java.util.zip.GZIPInputStream
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 const val DEFAULT_UA = "VLC/3.0.21 LibVLC/3.0.21"
 
@@ -27,12 +34,29 @@ object Net {
 
     fun request(url: String, ua: String) = Request.Builder().url(url).header("User-Agent", ua.ifBlank { DEFAULT_UA }).build()
 
-    suspend fun getString(url: String, ua: String): String = withContext(Dispatchers.IO) {
-        client.newCall(request(url, ua)).execute().use { r ->
-            if (!r.isSuccessful) throw IOException("Server returned ${r.code}")
-            r.body?.string() ?: ""
-        }
+    /** Cancelling a screen/reload also closes its socket and interrupts response-body reads. */
+    private suspend fun <T> read(url: String, ua: String, body: (Response, Call) -> T): T = suspendCancellableCoroutine { continuation ->
+        val call = client.newCall(request(url, ua))
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (continuation.isActive) continuation.resumeWithException(e)
+            }
+            override fun onResponse(call: Call, response: Response) {
+                response.use {
+                    try {
+                        if (!it.isSuccessful) throw IOException("Server returned ${it.code}")
+                        val result = body(it, call)
+                        if (continuation.isActive) continuation.resume(result)
+                    } catch (e: Exception) {
+                        if (continuation.isActive) continuation.resumeWithException(e)
+                    }
+                }
+            }
+        })
     }
+
+    suspend fun getString(url: String, ua: String): String = read(url, ua) { r, _ -> r.body?.string() ?: "" }
 
     /**
      * Downloads [url] into [file], reusing the existing copy when it is younger than [maxAgeMs].
@@ -44,15 +68,21 @@ object Net {
                 System.currentTimeMillis() - file.lastModified() < maxAgeMs
             ) return@withContext file
             file.parentFile?.mkdirs()
-            val tmp = File(file.parentFile, file.name + ".part")
+            // Cancelled requests can finish unwinding while a replacement starts. Each owns its temp file.
+            val tmp = File.createTempFile(file.name.padEnd(3, '_'), ".part", file.parentFile)
             try {
-                client.newCall(request(url, ua)).execute().use { r ->
-                    if (!r.isSuccessful) throw IOException("Server returned ${r.code}")
+                read(url, ua) { r, call ->
                     val body = r.body ?: throw IOException("Empty response")
-                    tmp.outputStream().use { out -> body.byteStream().copyTo(out, 64 * 1024) }
+                    try {
+                        tmp.outputStream().use { out -> body.byteStream().copyTo(out, 64 * 1024) }
+                        if (call.isCanceled()) throw CancellationException("Download cancelled")
+                        if (!tmp.renameTo(file)) { tmp.copyTo(file, overwrite = true); tmp.delete() }
+                        file
+                    } finally { tmp.delete() }
                 }
-                if (!tmp.renameTo(file)) { tmp.copyTo(file, overwrite = true); tmp.delete() }
-                file
+            } catch (e: CancellationException) {
+                tmp.delete()
+                throw e
             } catch (e: Exception) {
                 tmp.delete()
                 // A stale cache beats nothing when the provider is flaky.

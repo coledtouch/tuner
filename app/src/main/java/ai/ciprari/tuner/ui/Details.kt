@@ -94,12 +94,12 @@ fun MovieDetailScreen(movie: Movie, state: AppState) {
         loading = false
     }
     val recents by Repo.prefs.recents.collectAsState()
-    val resume = recents.firstOrNull { it.id == movie.id && it.positionMs > 0 }
+    val resume = recents.firstOrNull { it.id == movie.id && (it.url == movie.url || it.url in movie.backups) && it.positionMs > 0 }
     val first = remember(movie.id) { FocusRequester() }
     LaunchedEffect(movie.id) { requestAttachedFocus(first) }
 
     fun play(from: Long) = state.push(
-        Screen.Player(PlayRequest.Vod(movie.id, movie.name, info?.year, info?.poster ?: movie.poster, movie.url, from)),
+        Screen.Player(PlayRequest.Vod(movie.id, movie.name, info?.year, info?.poster ?: movie.poster, movie.url, from, streamBackups = movie.backups)),
     )
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -183,7 +183,6 @@ fun SeriesDetailScreen(series: Series, state: AppState) {
         loading = false
     }
     val recents by Repo.prefs.recents.collectAsState()
-    val recentById = remember(recents) { recents.associateBy { it.id } }
     var season by remember(series.id) { mutableIntStateOf(-1) }
     val playFocus = remember(series.id) { FocusRequester() }
     val requesters = remember(series.id) { mutableMapOf<String, FocusRequester>() }
@@ -196,8 +195,12 @@ fun SeriesDetailScreen(series: Series, state: AppState) {
     val allEpisodes = remember(seasons) {
         seasons.toSortedMap().values.flatMap { episodes -> episodes.sortedWith(compareBy<Episode> { it.number }.thenBy { it.id }) }
     }
+    val recentById = remember(recents, allEpisodes) {
+        val episodesById = allEpisodes.associateBy { it.id }
+        recents.filter { episodesById[it.id]?.url == it.url }.associateBy { it.id }
+    }
     val lastWatched = remember(recents, allEpisodes) {
-        recents.firstNotNullOfOrNull { recent -> allEpisodes.firstOrNull { it.id == recent.id }?.let { it to recent } }
+        recents.firstNotNullOfOrNull { recent -> allEpisodes.firstOrNull { it.id == recent.id && it.url == recent.url }?.let { it to recent } }
     }
     val returningEpisode = allEpisodes.firstOrNull { it.id == state.lastEpisodeKey }.takeIf { state.restoreFocus }
     val selectedSeason = season.takeIf { it in seasonKeys }
