@@ -17,7 +17,8 @@ $matches = @($profiles.SelectNodes("//*[local-name()='profile']") | Where-Object
 if ($matches.Count -ne 1) { throw 'The requested certificate profile does not exist in the private profiles file.' }
 Invoke-TunerNative 'node' @((Join-Path $PSScriptRoot 'build.js'), $output)
 $build = Get-Content -LiteralPath (Join-Path $output 'build.json') -Raw | ConvertFrom-Json
-Invoke-TunerNative $sdk.Cli @('cli-config', '-g', "default.profiles.path=$profilesPath")
+# Samsung's Windows batch wrapper requires a quoted key=value argument even without spaces.
+Invoke-TunerNative $sdk.Cli @('cli-config', '-g', ('"default.profiles.path=' + $profilesPath + '"'))
 $signedDirectory = Join-Path $output ('signed-' + [guid]::NewGuid().ToString('N').Substring(0, 12))
 New-Item -ItemType Directory -Path $signedDirectory | Out-Null
 Invoke-TunerNative $sdk.Cli @('package', '-t', 'wgt', '-s', $CertificateProfile, '-o', $signedDirectory, '--', $build.staging)
