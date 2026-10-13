@@ -49,6 +49,7 @@
     currentPlayItem = null;
   var dual = null,
     dualActive = false,
+    dualRestarting = false,
     dualAudio = 0,
     dualMode = "split",
     dualControls = true,
@@ -1491,7 +1492,7 @@
       button("About Tuner", "about-tuner", function () {
         showDialog(
           "Tuner for Samsung TV",
-          "Version 1.4.6 · Samsung TV\nLive TV, guide, movies, series and Favorites. Two-channel PiP works on supported TVs and playlists. Embedded torrent playback is not available on Samsung.",
+          "Version 1.4.7 · Samsung TV\nLive TV, guide, movies, series and Favorites. Two-channel PiP works on supported TVs and playlists. Embedded torrent playback is not available on Samsung.",
           []
         );
       })
@@ -1818,14 +1819,71 @@
     renderMultiView();
     scheduleDualControls();
   }
+  function dualNeedsMainAudio() {
+    return !!(dual && dual.capability && dual.capability.requiresMainAudio);
+  }
+  function playDualChannel(slot) {
+    var c = dualChannels[slot];
+    return dual.play(slot, {
+      url: c.url,
+      backups: c.backups,
+      live: true,
+      title: c.name,
+      id: c.id,
+    });
+  }
+  function promoteDualChannel(slot) {
+    if (!dualActive || !dual || dualRestarting || !dualChannels[0] || !dualChannels[1]) return false;
+    dualRestarting = true;
+    clearTimeout(dualControlsTimer);
+    var success = false;
+    try {
+      // Close both streams before either channel is reopened in its new role.
+      // The retained player resets its audio route to the default MAIN surface.
+      dual.stop();
+      if (slot === 1) dualChannels = [dualChannels[1], dualChannels[0]];
+      dualAudio = 0;
+      dualStates = [{ status: "loading" }, { status: "loading" }];
+      applyDualRects();
+      if (playDualChannel(0) === false || playDualChannel(1) === false)
+        throw new Error("DualRestartFailed");
+      success = true;
+    } catch (error) {
+      stopDual();
+      toast("The channels could not restart. Try Watch both again.");
+    }
+    dualRestarting = false;
+    renderMultiView();
+    scheduleDualControls();
+    return success;
+  }
+  function selectDualAudio(slot) {
+    if (!dualActive || !dual) {
+      if (dualNeedsMainAudio() && slot === 1) {
+        dualChannels = [dualChannels[1], dualChannels[0]];
+        dualAudio = 0;
+      } else dualAudio = slot;
+      return true;
+    }
+    if (dualNeedsMainAudio()) {
+      if (slot === 0 && dualAudio === 0) return true;
+      return promoteDualChannel(slot);
+    }
+    if (dual.selectAudio(slot) === true) {
+      dualAudio = slot;
+      return true;
+    }
+    return dualNeedsMainAudio() ? promoteDualChannel(slot) : false;
+  }
   function dualAudioButton(slot) {
     return button(
-      dualAudio === slot ? "🔊 Audio " + (slot + 1) : "Listen to " + (slot + 1),
+      dualAudio === slot ? "🔊 Audio " + (slot + 1) : dualNeedsMainAudio() ? "Make main" : "Listen to " + (slot + 1),
       "dual-audio-" + slot,
       function () {
-        if (dualActive && dual && dual.selectAudio(slot) === false)
-          return toast("Audio could not switch on this TV.");
-        dualAudio = slot;
+        if (!selectDualAudio(slot)) {
+          if (dualActive) toast("Audio could not switch on this TV.");
+          return;
+        }
         renderMultiView();
         scheduleDualControls();
       },
@@ -1984,13 +2042,7 @@
               dualChannels[slot] = c;
               closeDialog(false);
               if (dualActive && dual && (!previous || previous.id !== c.id || previous.url !== c.url))
-                dual.play(slot, {
-                  url: c.url,
-                  backups: c.backups,
-                  live: true,
-                  title: c.name,
-                  id: c.id,
-                });
+                playDualChannel(slot);
               renderMultiView();
               scheduleDualControls();
             },
@@ -2036,29 +2088,25 @@
             var previousStatus = dualStates[slot].status;
             dualStates[slot] = state;
             var other = 1 - slot;
-            if (dualActive && dual && state.status === "error" && previousStatus !== "error" &&
-                slot === dualAudio && dualStates[other].status === "playing" &&
-                dual.selectAudio(other) === true) {
-              dualAudio = other;
-            }
-            if (S.tab === 5 && !S.dialog) renderMultiView();
+            if (!dualRestarting && dualActive && dual && state.status === "error" && previousStatus !== "error" &&
+                slot === dualAudio && dualStates[other].status === "playing")
+              selectDualAudio(other);
+            if (!dualRestarting && S.tab === 5 && !S.dialog) renderMultiView();
           },
         });
+      if (dualAudio === 1 && (dualNeedsMainAudio() || dual.capability && dual.capability.native)) {
+        dualChannels = [dualChannels[1], dualChannels[0]];
+        dualAudio = 0;
+      }
       dualActive = true;
       dualControls = true;
       dualFocusId = "dual-pick-0";
       dualStates = [{ status: "loading" }, { status: "loading" }];
       renderMultiView();
-      dualChannels.forEach(function (c, slot) {
-        dual.play(slot, {
-          url: c.url,
-          backups: c.backups,
-          live: true,
-          title: c.name,
-          id: c.id,
-        });
-      });
-      dual.selectAudio(dualAudio);
+      playDualChannel(0);
+      playDualChannel(1);
+      if (!dualNeedsMainAudio() && !(dual.capability && dual.capability.native))
+        dual.selectAudio(dualAudio);
       applyDualRects();
       scheduleDualControls();
     } catch (e) {

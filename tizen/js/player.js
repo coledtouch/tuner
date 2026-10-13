@@ -20,7 +20,7 @@
     for (i = 0; i < nativeOwners.length; i += 1) {
       if (nativeOwners[i].manager === manager) { return nativeOwners[i]; }
     }
-    var record = { manager: manager, owner: null, dual: false, appliedMuted: null, audioActive: false, audioPeerRetry: false };
+    var record = { manager: manager, owner: null, dual: false, appliedMuted: null, audioActive: false };
     nativeOwners.push(record);
     return record;
   }
@@ -189,7 +189,6 @@
           try { av.close(); } catch (ignore) {}
           ownership.appliedMuted = null;
           ownership.audioActive = false;
-          ownership.audioPeerRetry = false;
         }
       } else if (video) {
         removeHtmlListeners();
@@ -321,40 +320,17 @@
         if (peer !== ownership && peer.owner && peer.audioActive) { peer.appliedMuted = null; }
       }
     }
-    function audioTypeMismatch(error) {
-      return error && error.name === 'TypeMismatchError' && error.code === 17;
-    }
     function applyAudio(force) {
       if (!audioPending || !av || ownership.owner !== api || suspended || (!force && operation)) { return; }
-      ownership.audioPeerRetry = false;
       if (ownership.appliedMuted === muted) { audioPending = false; return; }
+      if (!force && options.mainAudioOnly && options.mainAudioOnly()) { audioPending = false; return; }
       var method = muted ? 'disableAudioStream' : 'enableAudioStream';
       if (typeof av[method] !== 'function') { throw new Error('DualAudioUnsupported'); }
       try { av[method](); }
       catch (error) {
         forgetAudioState();
-        // Some M7 routes reject enable until the previous route is released.
-        // Only the synchronous, prepared dual PLAYING failure permits that retry.
-        ownership.audioPeerRetry = !muted && !!options.multiviewResource && prepared && !operation &&
-          nativeState() === 'PLAYING' && error && error.name === 'InvalidAccessError' && error.code === 15;
-        if (muted || !options.multiviewResource || !prepared || operation ||
-            nativeState() !== 'PLAYING' || !audioTypeMismatch(error)) { throw error; }
-        // M7 firmware can apply enableAudioStream, then throw TypeMismatch(17).
-        // A successful disable proves this target was enabled. A genuine
-        // before-effect failure leaves it muted and cannot pass this probe.
-        av.disableAudioStream();
-        ownership.appliedMuted = true;
-        rememberPeerSilence();
-        try { av.enableAudioStream(); }
-        catch (retryError) {
-          if (!audioTypeMismatch(retryError)) {
-            forgetAudioState();
-            ownership.audioPeerRetry = prepared && !operation && nativeState() === 'PLAYING' &&
-              retryError && retryError.name === 'InvalidAccessError' && retryError.code === 15;
-            throw retryError;
-          }
-          // The same verified firmware error on re-enable is a false negative.
-        }
+        if (options.multiviewResource && prepared && !suspended && options.onAudioError) { options.onAudioError(); }
+        throw error;
       }
       ownership.appliedMuted = muted;
       if (!muted) { rememberPeerSilence(); }
@@ -364,7 +340,14 @@
       if (!current(t) || !prepared || suspended || operation) { return; }
       try {
         var s = nativeState();
-        applyAudio(false);
+        try { applyAudio(false); }
+        catch (audioError) {
+          if (options.mainAudioOnly && options.mainAudioOnly()) {
+            terminal(t, 'This TV needs the channel to be the main picture for audio.');
+            return;
+          }
+          throw audioError;
+        }
         if (wantedPlaying) {
           if (s !== 'PLAYING') { av.play(); }
           applyTracks();
@@ -411,15 +394,18 @@
       operation = 'prepare';
       try {
         av.open(sources[sourceIndex]);
-        ownership.appliedMuted = null;
+        if (options.mainAudioOnly && options.mainAudioOnly()) { muted = options.multiviewResource === 'sub'; }
+        // A newly opened MAIN already has default audio. Avoid re-routing it.
+        ownership.appliedMuted = options.multiviewResource === 'main' ? false : null;
         ownership.audioActive = true;
-        ownership.audioPeerRetry = false;
         if (options.multiviewResource) {
           try {
-            av.setStreamingProperty('IN_APP_MULTIVIEW', options.multiviewResource === 'sub' ?
-              'VIDEO_VIEW_RESOURCE_SUB' : 'VIDEO_VIEW_RESOURCE_MAIN');
+            // Samsung's multiview sample disables SUB audio in IDLE before
+            // assigning its video resource. MAIN keeps the default audio.
             audioPending = true;
             applyAudio(true);
+            av.setStreamingProperty('IN_APP_MULTIVIEW', options.multiviewResource === 'sub' ?
+              'VIDEO_VIEW_RESOURCE_SUB' : 'VIDEO_VIEW_RESOURCE_MAIN');
           } catch (unsupported) {
             terminal(t, 'Dual view is not supported by this TV. You can watch either channel on its own.');
             return;
@@ -653,7 +639,10 @@
     };
     api.setMuted = function (value, quiet) {
       var previousMuted = muted, previousPending = audioPending;
-      if (ownership) { ownership.audioPeerRetry = false; }
+      if (av && state.request && options.mainAudioOnly && options.mainAudioOnly()) {
+        var defaultMuted = options.multiviewResource === 'sub';
+        if (!!value !== defaultMuted || (prepared && ownership.appliedMuted !== defaultMuted)) { return false; }
+      }
       muted = !!value;
       if (!av) { if (video) { video.muted = muted; } return true; }
       audioPending = true;
@@ -738,7 +727,7 @@
     var native = !!(root.webapis && root.webapis.avplay);
     var store = root.webapis && root.webapis.avplaystore;
     var version = platformVersion();
-    var capability = { supported: true, native: native, reason: '' };
+    var capability = { supported: true, native: native, reason: '', requiresMainAudio: false, audioReason: '' };
     var audioSlot = 0;
     var closed = false;
     if (native && ((version && version < 7) || !store || typeof store.getPlayer !== 'function')) {
@@ -774,6 +763,11 @@
     function makePlayer(slot) {
       return create({ nativePlayer: native ? dualManagers[slot] : null,
         multiviewResource: native ? (slot === 0 ? 'main' : 'sub') : '', mute: slot !== audioSlot,
+        mainAudioOnly: function () { return capability.requiresMainAudio; },
+        onAudioError: function () {
+          capability.requiresMainAudio = true;
+          capability.audioReason = 'This TV needs the channel to be the main picture for audio.';
+        },
         objectElement: (options.objectElements || [])[slot], videoElement: (options.videoElements || [])[slot],
         onState: function (state) { if (options.onState) { options.onState(slot, state); } },
         onTime: function (position, duration) { if (options.onTime) { options.onTime(slot, position, duration); } },
@@ -803,37 +797,32 @@
     api.selectAudio = function (slot) {
       if ((slot !== 0 && slot !== 1) || !capability.supported) { return false; }
       if (!players[slot].state.request || /^(idle|error)$/.test(players[slot].state.status)) { return false; }
-      var previous = audioSlot, releasedPeer = false, enabled, retry = false;
+      if (native && capability.requiresMainAudio && slot !== 0) { return false; }
+      var previous = audioSlot, enabled;
       // enableAudioStream automatically silences the other active instance.
       // Enable the chosen player first so a failure retains the previous audio.
       enabled = players[slot].setMuted(false, true);
-      if (!enabled && native) {
-        for (var ownerIndex = 0; ownerIndex < nativeOwners.length; ownerIndex += 1) {
-          var record = nativeOwners[ownerIndex];
-          if (record.owner === players[slot]) { retry = record.audioPeerRetry; break; }
-        }
-      }
-      if (retry) {
-        releasedPeer = true;
-        // A failed mute can still release the TV's stale audio reservation.
-        // Do not adopt that failure; the chosen route must succeed or pass the
-        // disable-verified code17 workaround before selection can change.
-        players[previous].setMuted(true, true);
-        enabled = players[slot].setMuted(false, true);
-      }
       if (enabled && players[1 - slot].setMuted(true, true)) {
         audioSlot = slot;
         return true;
       }
-      if (releasedPeer || enabled) { players[1 - previous].setMuted(true, true); }
-      players[previous].setMuted(false, true);
-      if (options.onError) { options.onError(slot, 'This TV could not switch the audio. Please retry.'); }
+      // Do not probe or re-enable after native errors. Some firmware applies
+      // the route, throws, then freezes its playback clock on further calls.
+      if (!native || !capability.requiresMainAudio) {
+        if (enabled) { players[1 - previous].setMuted(true, true); }
+        players[previous].setMuted(false, true);
+      }
+      if (options.onError) { options.onError(slot, capability.audioReason || 'This TV could not switch the audio. Please retry.'); }
       return false;
     };
     api.stop = function () {
       if (closed) { return; }
       closed = true;
       for (var slot = 0; slot < players.length; slot += 1) { players[slot].stop(); }
+      // Both native streams are closed before resetting audio intent. A safe
+      // restart always opens the chosen channel as MAIN with default audio.
+      audioSlot = 0;
+      if (players.length === 2) { players[0].setMuted(false, true); players[1].setMuted(true, true); }
       if (dualOwner === api) { dualOwner = null; }
     };
     api.suspend = function () { for (var slot = 0; slot < players.length; slot += 1) { players[slot].suspend(); } };

@@ -519,101 +519,102 @@ function playingDual() {
   return { ...h, dual };
 }
 
-test('M7 peer-first retry releases the previous route and switches both ways without reconnects or transient errors', () => {
+test('native dual startup keeps default MAIN audio and mutes SUB before assigning its resource', () => {
   const h = playingDual();
-  for (const [slot, manager] of h.managers.entries()) {
-    const enable = manager.enableAudioStream;
-    manager.enableAudioStream = function () {
-      assert.equal(this, manager);
-      if (!manager.audioEnabled && h.managers[1 - slot].audioEnabled) {
-        throw { name: 'InvalidAccessError', code: 15 };
-      }
-      enable.call(this);
-      throw { name: 'TypeMismatchError', code: 17 };
-    };
-  }
-  for (const slot of [1, 0, 1]) {
-    assert.equal(h.dual.selectAudio(slot), true);
-    assert.equal(h.managers[slot].audioEnabled, true); assert.equal(h.managers[1 - slot].audioEnabled, false);
-    const calls = h.managers.map(manager => manager.calls.length);
-    assert.equal(h.dual.selectAudio(slot), true);
-    assert.deepEqual(h.managers.map(manager => manager.calls.length), calls, 'confirmed selection remains a no-op');
-  }
-  assert.deepEqual(h.audioErrors, [], 'recovered attempts never report a stale audio error');
-  assert.deepEqual(h.managers.map(manager => manager.prepares.length), [1, 1]);
-  assert.equal(h.allocated, 2);
-});
-
-test('a peer mute false negative can release its reservation but only a verified target success changes audio intent', () => {
-  const h = playingDual(), targetEnable = h.managers[1].enableAudioStream;
-  const peerDisable = h.managers[0].disableAudioStream;
-  let reserved = true, releaseCalls = 0, targetAttempts = 0;
-  h.managers[0].disableAudioStream = function () {
-    assert.equal(this, h.managers[0]); releaseCalls++; reserved = false;
-    peerDisable.call(this);
-    throw { name: 'InvalidAccessError', code: 15 };
-  };
-  h.managers[1].enableAudioStream = function () {
-    targetAttempts++;
-    if (reserved) { throw { name: 'InvalidAccessError', code: 15 }; }
-    targetEnable.call(this); throw { name: 'TypeMismatchError', code: 17 };
-  };
-  assert.equal(h.dual.selectAudio(1), true);
-  assert.equal(releaseCalls, 1, 'the final peer intent adopts confirmed silence instead of disabling twice');
-  assert.equal(targetAttempts, 3, 'one route retry and its verified re-enable are bounded');
-  assert.equal(h.managers[0].audioEnabled, false); assert.equal(h.managers[1].audioEnabled, true);
-  h.managers[0].disableAudioStream = peerDisable; h.managers[1].enableAudioStream = targetEnable;
-  h.dual.suspend(); h.dual.restore(); h.managers.forEach(manager => manager.completeRestore());
-  assert.equal(h.managers[0].audioEnabled, false); assert.equal(h.managers[1].audioEnabled, true,
-    'successful retry repairs desired mute state before later restore');
-  assert.deepEqual(h.audioErrors, []);
-  assert.deepEqual(h.managers.map(manager => manager.prepares.length), [1, 1]);
-});
-
-test('code15 on the verified M7 re-enable also permits one peer-release retry', () => {
-  const h = playingDual(), enable = h.managers[1].enableAudioStream;
-  let reserved = true, attempts = 0, releases = 0;
-  h.managers[1].enableAudioStream = function () {
-    assert.equal(this, h.managers[1]); attempts++;
-    if (attempts > 1 && reserved) { throw { name: 'InvalidAccessError', code: 15 }; }
-    enable.call(this); throw { name: 'TypeMismatchError', code: 17 };
-  };
-  h.managers[0].disableAudioStream = function () {
-    assert.equal(this, h.managers[0]); releases++; reserved = false;
-    assert.equal(h.managers[0].audioEnabled, false, 'the first applied enable already silenced the old route');
-    throw { name: 'InvalidAccessError', code: 15 };
-  };
-  assert.equal(h.dual.selectAudio(1), true);
-  assert.equal(attempts, 4, 'the failed verified re-enable leads to one target retry and its verification');
-  assert.equal(releases, 1);
-  assert.equal(h.managers[0].audioEnabled, false); assert.equal(h.managers[1].audioEnabled, true);
-  assert.deepEqual(h.audioErrors, []);
-  const before = h.managers.map(manager => manager.calls.length);
-  assert.equal(h.dual.selectAudio(1), true);
-  assert.deepEqual(h.managers.map(manager => manager.calls.length), before);
-  assert.deepEqual(h.managers.map(manager => manager.prepares.length), [1, 1]);
-  assert.equal(h.allocated, 2);
-});
-
-test('failed peer-first retry is bounded and re-enables the previous route with one final error', () => {
-  const h = playingDual();
-  const targetEnable = h.managers[1].enableAudioStream;
-  const enables = h.managers[0].calls.filter(call => call[0] === 'enableAudioStream').length;
-  let attempts = 0;
-  h.managers[1].enableAudioStream = function () { attempts++; throw { name: 'InvalidAccessError', code: 15 }; };
-  assert.equal(h.dual.selectAudio(1), false);
-  assert.equal(attempts, 2);
+  assert.equal(h.managers[0].calls.filter(call => call[0] === 'enableAudioStream').length, 0);
   assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false);
-  assert.equal(h.managers[0].calls.filter(call => call[0] === 'enableAudioStream').length, enables + 1,
-    'rollback cannot trust the old cache after the previous route was released');
-  assert.equal(h.audioErrors.length, 1);
-  assert.equal(h.audioErrors[0].slot, 1);
-  assert.equal(h.dual.selectAudio(0), true, 'failed selection keeps the original desired audio');
-  h.managers[1].enableAudioStream = targetEnable;
-  h.dual.suspend(); h.dual.restore(); h.managers.forEach(manager => manager.completeRestore());
-  assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false,
-    'the failed requested route is not applied by a later restore');
+  const subCalls = h.managers[1].calls;
+  assert.ok(subCalls.findIndex(call => call[0] === 'disableAudioStream') < subCalls.findIndex(call => call[0] === 'setStreamingProperty'));
+  assert.equal(h.dual.capability.requiresMainAudio, false);
+});
+
+test('a thrown native audio enable is never treated as success or followed by decoder-corrupting verification', () => {
+  const h = playingDual(), enable = h.managers[1].enableAudioStream;
+  let attempts = 0;
+  h.managers[1].enableAudioStream = function () {
+    assert.equal(this, h.managers[1]); attempts++; enable.call(this); throw { name: 'TypeMismatchError', code: 17 };
+  };
+  const before = h.managers.map(manager => manager.calls.filter(call => /AudioStream$/.test(call[0])).length);
+  assert.equal(h.dual.selectAudio(1), false);
+  assert.equal(attempts, 1);
+  assert.equal(h.dual.capability.requiresMainAudio, true);
+  assert.match(h.dual.capability.audioReason, /main picture/);
+  assert.equal(h.managers[0].calls.filter(call => /AudioStream$/.test(call[0])).length, before[0], 'no native rollback or peer probe');
+  assert.equal(h.managers[1].calls.filter(call => /AudioStream$/.test(call[0])).length, before[1] + 1, 'only the original enable occurs');
+  const calls = h.managers.map(manager => manager.calls.length);
+  assert.equal(h.dual.selectAudio(1), false); assert.equal(h.dual.selectAudio(0), false);
+  assert.deepEqual(h.managers.map(manager => manager.calls.length), calls, 'fallback flag blocks further PLAYING route calls');
+  assert.equal(h.audioErrors.length, 2, 'one failure report per attempted synchronous selection');
   assert.deepEqual(h.managers.map(manager => manager.prepares.length), [1, 1]);
+});
+
+test('native before-effect audio errors request safe MAIN promotion without retrying or silencing the healthy peer', () => {
+  for (const error of [{ name: 'InvalidAccessError', code: 15 }, { name: 'TypeMismatchError', code: 17 }, { name: 'NotSupportedError' }]) {
+    const h = playingDual(); let attempts = 0;
+    h.managers[1].enableAudioStream = function () { attempts++; throw error; };
+    assert.equal(h.dual.selectAudio(1), false); assert.equal(attempts, 1);
+    assert.equal(h.dual.capability.requiresMainAudio, true);
+    assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false);
+    assert.equal(h.audioErrors.length, 1);
+    assert.deepEqual(h.managers.map(manager => manager.prepares.length), [1, 1]);
+  }
+});
+
+test('safe audio promotion closes both old feeds before reusing exactly two managers with default MAIN audio', () => {
+  const h = playingDual(), events = [];
+  const oldRequests = h.managers.map(manager => manager.prepares[0].url);
+  h.managers[1].enableAudioStream = function () { throw { name: 'InvalidAccessError', code: 15 }; };
+  assert.equal(h.dual.selectAudio(1), false);
+  for (const [slot, manager] of h.managers.entries()) {
+    const close = manager.close, open = manager.open;
+    manager.close = function () { events.push(['close', slot]); close.call(this); };
+    manager.open = function (url) {
+      if (events.filter(event => event[0] === 'open').length === 0) {
+        assert.deepEqual(h.managers.map(m => m.getState()), ['NONE', 'NONE'], 'both streams must close before the first new open');
+      }
+      events.push(['open', slot]); open.call(this, url);
+    };
+    manager.enableAudioStream = function () { throw Error('safe MAIN promotion must never enable native audio'); };
+  }
+  h.dual.stop();
+  h.dual.play(0, { url: oldRequests[1], live: true }); h.dual.play(1, { url: oldRequests[0], live: true });
+  h.managers.forEach(manager => manager.completePrepare());
+  assert.equal(h.managers[0].prepares.at(-1).url, oldRequests[1]); assert.equal(h.managers[1].prepares.at(-1).url, oldRequests[0]);
+  assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false);
+  assert.equal(h.managers[0].getState(), 'PLAYING'); assert.equal(h.managers[1].getState(), 'PLAYING');
+  assert.equal(h.dual.selectAudio(0), true); assert.equal(h.dual.selectAudio(1), false);
+  assert.equal(h.allocated, 2);
+  assert.equal(h.dual.capability.requiresMainAudio, true);
+  h.managers[0].event('oncurrentplaytime', 1000); h.managers[1].event('oncurrentplaytime', 1000);
+  for (let i = 1; i <= 8; i++) {
+    h.managers[0].clock = 1000 + i * 5000; h.managers[1].clock = 1000 + i * 5000; h.clock.advance(5000);
+  }
+  assert.deepEqual(h.managers.map(manager => manager.prepares.length), [2, 2]);
+});
+
+test('stopping a normally supported dual session resets next startup to default MAIN audio after both releases', () => {
+  const h = playingDual(); assert.equal(h.dual.selectAudio(1), true);
+  assert.equal(h.managers[1].audioEnabled, true);
+  h.dual.stop();
+  const enables = h.managers.map(manager => manager.calls.filter(call => call[0] === 'enableAudioStream').length);
+  h.dual.play(0, { url: 'https://example.test/next-main.ts', live: true }); h.dual.play(1, { url: 'https://example.test/next-sub.ts', live: true });
+  h.managers.forEach(manager => manager.completePrepare());
+  assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false);
+  assert.deepEqual(h.managers.map(manager => manager.calls.filter(call => call[0] === 'enableAudioStream').length), enables);
+  assert.equal(h.dual.capability.requiresMainAudio, false);
+});
+
+test('queued native audio errors expose MAIN fallback and terminate safely without backup DSP retries', () => {
+  const h = dualHarness(), dual = h.makeDual();
+  dual.play(0, { url: 'https://example.test/main.ts', backups: ['https://example.test/main-backup.ts'], live: true });
+  dual.play(1, { url: 'https://example.test/sub.ts', live: true });
+  assert.equal(dual.selectAudio(1), true, 'prepared callback owns this queued change');
+  h.managers[0].disableAudioStream = function () { throw { name: 'NotSupportedError' }; };
+  h.managers[0].completePrepare();
+  assert.equal(dual.capability.requiresMainAudio, true);
+  assert.equal(h.managers[0].getState(), 'NONE');
+  assert.equal(h.states.filter(entry => entry.slot === 0).at(-1).state.status, 'error');
+  assert.equal(h.managers[0].prepares.length, 1, 'audio routing failure is not retried against another source');
 });
 
 test('an unavailable dual pane cannot silence a healthy peer or queue a misleading audio choice', () => {
@@ -627,115 +628,6 @@ test('an unavailable dual pane cannot silence a healthy peer or queue a misleadi
   h.dual.stop(); const stopped = h.managers.map(manager => manager.calls.length);
   assert.equal(h.dual.selectAudio(0), false);
   assert.deepEqual(h.managers.map(manager => manager.calls.length), stopped);
-});
-
-test('before-effect TypeMismatch on the peer-first retry cannot be adopted and previous audio is restored', () => {
-  const h = playingDual();
-  let attempts = 0;
-  h.managers[1].enableAudioStream = function () {
-    attempts++;
-    throw { name: attempts === 1 ? 'InvalidAccessError' : 'TypeMismatchError', code: attempts === 1 ? 15 : 17 };
-  };
-  assert.equal(h.dual.selectAudio(1), false); assert.equal(attempts, 2, 'failed disable verification prevents a third enable');
-  assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false);
-  assert.equal(h.audioErrors.length, 1);
-  assert.deepEqual(h.managers.map(manager => manager.prepares.length), [1, 1]);
-});
-
-test('code15 peer-first recovery excludes paused and single-player playback', () => {
-  const h = playingDual(); h.managers.forEach(manager => manager.pause());
-  let attempts = 0;
-  const disables = h.managers[0].calls.filter(call => call[0] === 'disableAudioStream').length;
-  h.managers[1].enableAudioStream = function () { attempts++; throw { name: 'InvalidAccessError', code: 15 }; };
-  assert.equal(h.dual.selectAudio(1), false); assert.equal(attempts, 1);
-  assert.equal(h.managers[0].calls.filter(call => call[0] === 'disableAudioStream').length, disables);
-  assert.equal(h.managers[0].audioEnabled, true);
-  const single = harness(); single.player.play({ url: 'https://example.test/single.ts', live: true }); single.av.completePrepare();
-  single.player.setMuted(true); let singleAttempts = 0;
-  single.av.enableAudioStream = function () { singleAttempts++; throw { name: 'InvalidAccessError', code: 15 }; };
-  assert.equal(single.player.setMuted(false), false); assert.equal(singleAttempts, 1);
-  assert.equal(single.errors.length, 1, 'direct single-player failures still report normally');
-});
-
-test('M7 TypeMismatch after native enable is verified and accepted in both audio directions without reconnecting', () => {
-  const h = playingDual();
-  for (const manager of h.managers) {
-    const enable = manager.enableAudioStream;
-    manager.enableAudioStream = function () { assert.equal(this, manager); enable.call(this); throw { name: 'TypeMismatchError', code: 17 }; };
-  }
-  for (const slot of [1, 0, 1, 0]) {
-    assert.equal(h.dual.selectAudio(slot), true);
-    assert.equal(h.managers[slot].audioEnabled, true); assert.equal(h.managers[1 - slot].audioEnabled, false);
-    const before = h.managers.map(manager => manager.calls.length);
-    assert.equal(h.dual.selectAudio(slot), true);
-    assert.deepEqual(h.managers.map(manager => manager.calls.length), before, 'an already chosen route remains idempotent');
-  }
-  assert.deepEqual(h.managers.map(manager => manager.prepares.length), [1, 1]);
-  assert.equal(h.allocated, 2);
-});
-
-test('a genuine before-effect TypeMismatch cannot pass the M7 enabled-route probe', () => {
-  const h = playingDual();
-  let attempts = 0;
-  h.managers[1].enableAudioStream = function () { attempts++; throw { name: 'TypeMismatchError', code: 17 }; };
-  assert.equal(h.dual.selectAudio(1), false);
-  assert.equal(attempts, 1, 'an unsuccessful disable probe must not reach re-enable');
-  assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false);
-  assert.equal(h.dual.selectAudio(0), true, 'the previous selected route remains the desired route');
-  h.dual.suspend(); h.dual.restore(); h.managers.forEach(manager => manager.completeRestore());
-  assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false);
-  assert.deepEqual(h.managers.map(manager => manager.prepares.length), [1, 1]);
-});
-
-test('failed M7 re-enable restores the auto-silenced peer using a real enable, rather than its stale cache', () => {
-  const h = playingDual(), enable = h.managers[1].enableAudioStream;
-  const priorEnables = h.managers[0].calls.filter(call => call[0] === 'enableAudioStream').length;
-  let attempts = 0;
-  h.managers[1].enableAudioStream = function () {
-    if (++attempts === 1) { enable.call(this); throw { name: 'TypeMismatchError', code: 17 }; }
-    throw { name: 'NotSupportedError' };
-  };
-  assert.equal(h.dual.selectAudio(1), false); assert.equal(attempts, 2);
-  assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false);
-  assert.equal(h.managers[0].calls.filter(call => call[0] === 'enableAudioStream').length, priorEnables + 1);
-  h.dual.suspend(); h.dual.restore(); h.managers.forEach(manager => manager.completeRestore());
-  assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false);
-  assert.deepEqual(h.managers.map(manager => manager.prepares.length), [1, 1]);
-});
-
-test('a failed verification read after an applied M7 enable also restores previous audio', () => {
-  const h = playingDual(), enable = h.managers[1].enableAudioStream, disable = h.managers[1].disableAudioStream;
-  h.managers[1].enableAudioStream = function () { enable.call(this); throw { name: 'TypeMismatchError', code: 17 }; };
-  h.managers[1].disableAudioStream = function () { throw { name: 'UnknownError' }; };
-  assert.equal(h.dual.selectAudio(1), false);
-  assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false);
-  h.managers[1].disableAudioStream = disable;
-  assert.equal(h.dual.selectAudio(1), true, 'an explicit retry can succeed once native verification is available');
-  assert.equal(h.managers[0].audioEnabled, false); assert.equal(h.managers[1].audioEnabled, true);
-  assert.deepEqual(h.managers.map(manager => manager.prepares.length), [1, 1]);
-});
-
-test('TypeMismatch workaround stays restricted to prepared PLAYING multiview and code 17', () => {
-  const h = playingDual(), enable = h.managers[1].enableAudioStream;
-  h.managers[1].enableAudioStream = function () { enable.call(this); throw { name: 'TypeMismatchError', code: 99 }; };
-  const disables = h.managers[1].calls.filter(call => call[0] === 'disableAudioStream').length;
-  assert.equal(h.dual.selectAudio(1), false);
-  assert.equal(h.managers[1].calls.filter(call => call[0] === 'disableAudioStream').length, disables, 'other errors never use the compatibility probe');
-  assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false);
-  const paused = playingDual(), pausedEnable = paused.managers[1].enableAudioStream;
-  paused.managers.forEach(manager => manager.pause());
-  paused.managers[1].enableAudioStream = function () { pausedEnable.call(this); throw { name: 'TypeMismatchError', code: 17 }; };
-  const pausedDisables = paused.managers[1].calls.filter(call => call[0] === 'disableAudioStream').length;
-  assert.equal(paused.dual.selectAudio(1), false);
-  assert.equal(paused.managers[1].calls.filter(call => call[0] === 'disableAudioStream').length, pausedDisables, 'paused playback never uses the compatibility probe');
-  assert.equal(paused.managers[0].audioEnabled, true); assert.equal(paused.managers[1].audioEnabled, false);
-  const single = harness(); single.player.play({ url: 'https://example.test/single.ts', live: true }); single.av.completePrepare();
-  single.player.setMuted(true);
-  const singleEnable = single.av.enableAudioStream;
-  single.av.enableAudioStream = function () { singleEnable.call(this); throw { name: 'TypeMismatchError', code: 17 }; };
-  const singleDisables = single.av.calls.filter(call => call[0] === 'disableAudioStream').length;
-  assert.equal(single.player.setMuted(false), false);
-  assert.equal(single.av.calls.filter(call => call[0] === 'disableAudioStream').length, singleDisables, 'single-player semantics are unchanged');
 });
 
 test('reopening a muted dual stream resets applied audio state and mutes the new stream once', () => {
@@ -851,7 +743,7 @@ test('desktop dual preview uses two real HTML videos with one chosen audio strea
   dual.stop(); await Promise.resolve(); assert.equal(videos[0].src, ''); assert.equal(videos[1].src, '');
 });
 
-test('audio switch failures keep the previous native audio selection and never reconnect', () => {
+test('audio switch failure preserves source streams until explicit safe restart', () => {
   const h = dualHarness(), dual = h.makeDual();
   dual.play(0, { url: 'https://example.test/game1.ts', live: true });
   dual.play(1, { url: 'https://example.test/game2.ts', live: true });
@@ -867,8 +759,9 @@ test('audio switch failures keep the previous native audio selection and never r
   h.managers[0].completeRestore(); h.managers[1].completeRestore();
   assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false,
     'a failed audio choice must not be applied by a later restore');
-  assert.equal(dual.selectAudio(1), true, 'the same choice can be retried after the native failure clears');
-  assert.equal(h.managers[0].audioEnabled, false); assert.equal(h.managers[1].audioEnabled, true);
+  assert.equal(dual.capability.requiresMainAudio, true);
+  assert.equal(dual.selectAudio(1), false, 'native DSP calls remain blocked until explicit MAIN promotion');
+  assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false);
   assert.equal(h.managers[0].prepares.length, 1); assert.equal(h.managers[1].prepares.length, 1);
 });
 
