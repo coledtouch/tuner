@@ -1,6 +1,6 @@
 # Tuner
 
-IPTV player for Android TV and Google TV. Cable-style Live TV guide, live preview, movies, series, search, and themes. Version 1.5.0 adds fast saved-library startup, two-channel Multi View with side-by-side or in-app Picture in Picture, a True Black theme, personal Most Watched, and a labelled navigation bar that scrolls on smaller screens. Guide browsing, Favorites, unrestricted movie and series audio, native Android Picture-in-Picture, and the integrated Streaming tab remain available.
+IPTV player for Android TV and Google TV. Cable-style Live TV guide, live preview, movies, series, search, and themes. Version 1.5.1 expands two-channel Multi View to the full screen, with controls that hide while you watch. Fast saved-library startup, a True Black theme, personal Most Watched, labelled navigation, Favorites, unrestricted movie and series audio, native Android Picture-in-Picture, and the integrated Streaming tab remain available.
 
 The [Samsung Tizen TV app](tizen/README.md) provides Live TV, Movies, Series, Search, a black theme, and two-channel side-by-side or in-app Picture in Picture. It is built and signed separately from the Android APK using a Samsung TV certificate.
 
@@ -13,7 +13,7 @@ The [Samsung Tizen TV app](tizen/README.md) provides Live TV, Movies, Series, Se
 
 ```powershell
 adb connect 192.168.1.50:5555
-adb install -r .\Tuner-1.5.0.apk
+adb install -r .\Tuner-1.5.1.apk
 ```
 
 Accept the debugging prompt on the TV the first time. Tuner shows up in your Apps row.
@@ -54,13 +54,16 @@ Guide categories begin with All Channels, Favorites, and Most Watched. Most Watc
 | Movies / episodes | Left / Right | Seek 10s (hold to go faster) |
 | Movies / episodes | OK | Play / pause |
 | Movies / episodes | Down | Audio, subtitles, next episode |
-| Multi View | OK on a video | Listen to that channel |
+| Multi View | OK / arrows / Menu | Reveal controls while watching |
+| Multi View | OK on a video with controls visible | Listen to that channel |
 | Multi View | Channel +/- | Change the focused channel |
-| Multi View | Back | Stop both channels and return to Live TV |
+| Multi View | Back | Hide visible controls; press again to stop both and return to Live TV |
 
 ## Two-channel Multi View
 
 Open **Multi View**, choose two different channels, then select **Watch both**. The picker offers search, Favorites, Most Watched and suggested sports. Browsing the picker never tunes a channel. During playback, choosing a replacement changes only that slot. Select **Side by side** or **Picture in Picture** to change the layout without reopening either stream. Press OK on a video or use the Audio button to choose the one audible channel. Save Favorites with the picker star or Hold OK.
+
+Playback uses the full screen, without the app navigation or setup dashboard. Controls and channel labels disappear after five seconds; OK, an arrow or Menu brings them back. Picture in Picture fills the screen with the main channel and overlays the second channel in a corner. Side by side uses the full screen width with both pictures centered vertically. The original picture proportions are preserved so football scoreboards are not cropped or stretched. Back hides visible controls first; another Back returns to Live TV and stops both streams.
 
 Multi View uses at most two concurrent live streams. It stops the ordinary guide/full-screen stream before starting. Leaving the page, changing playlists or putting the app in the background closes both connections; returning from the background restores the selected pair. A failed channel can be retried or replaced independently. Picture quality is capped at 1080p per slot to suit TV hardware. Two streams must be available within your provider account limit, including any playback on other devices.
 

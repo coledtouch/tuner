@@ -64,6 +64,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import ai.ciprari.tuner.data.LoadStatus
 import ai.ciprari.tuner.data.Repo
+import ai.ciprari.tuner.player.TwoChannelPlayer
 import kotlinx.coroutines.delay
 
 /** Lightweight toast shown at the bottom of the home screen. */
@@ -77,15 +78,19 @@ object Toasts {
 
 @Composable
 fun HomeScreen(state: AppState) {
+    val multiViewActive by TwoChannelPlayer.active.collectAsState()
+    val watchingMultiView = state.tab == Tab.MULTIVIEW && multiViewActive
     HomeNavigationBackHandler(state)
     Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Palette.surface, Palette.bg, Palette.bg)))
         .onPreviewKeyEvent {
-            if (it.type == KeyEventType.KeyDown && it.nativeKeyEvent.keyCode == AndroidKeyEvent.KEYCODE_MENU) {
+            if (!watchingMultiView && it.type == KeyEventType.KeyDown && it.nativeKeyEvent.keyCode == AndroidKeyEvent.KEYCODE_MENU) {
                 state.requestNavigation(); true
             } else false
         }) {
         Column(Modifier.fillMaxSize()) {
-            TopBar(state)
+            // Keep the content call in the same composition slot as the bar disappears.
+            // Moving MultiViewScreen to another branch would dispose both video surfaces.
+            if (!watchingMultiView) TopBar(state)
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 when (state.tab) {
                     Tab.GUIDE -> GuideScreen(state)

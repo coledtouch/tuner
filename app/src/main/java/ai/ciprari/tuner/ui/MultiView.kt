@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -36,6 +37,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -50,6 +52,7 @@ import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
@@ -66,6 +69,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.media3.ui.PlayerView
+import androidx.media3.ui.AspectRatioFrameLayout
 import ai.ciprari.tuner.R
 import ai.ciprari.tuner.data.Category
 import ai.ciprari.tuner.data.Channel
@@ -73,6 +77,7 @@ import ai.ciprari.tuner.data.LoadStatus
 import ai.ciprari.tuner.data.Repo
 import ai.ciprari.tuner.player.TwoChannelPlayer
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -90,6 +95,28 @@ class MultiViewUiState {
 
 private val sportsChannelName = Regex("\\b(?:ESPN|NESN|SPORTS|SPORTSNET|NFL|NBA|NHL|MLB|NCAA|GOLF|TENNIS|FANDUEL|BALLY|FOOTBALL|SOCCER|DAZN|UFC|PPV)\\b", RegexOption.IGNORE_CASE)
 
+internal data class MultiViewFrame(val x: Float, val y: Float, val width: Float, val height: Float)
+
+/** Surface rectangles change in place. PlayerView handles FIT inside each rectangle. */
+internal fun multiViewFrames(width: Float, height: Float, pictureInPicture: Boolean, fullscreen: Boolean): List<MultiViewFrame> {
+    if (!pictureInPicture) {
+        val gap = if (fullscreen) 0f else 12f
+        val paneWidth = (width - gap) / 2
+        val paneHeight = minOf(height, paneWidth * 9 / 16)
+        val top = (height - paneHeight) / 2
+        return listOf(MultiViewFrame(0f, top, paneWidth, paneHeight), MultiViewFrame(paneWidth + gap, top, paneWidth, paneHeight))
+    }
+    val mainWidth = if (fullscreen) width else minOf(width, height * 16 / 9)
+    val mainHeight = if (fullscreen) height else mainWidth * 9 / 16
+    val left = (width - mainWidth) / 2
+    val top = (height - mainHeight) / 2
+    val margin = if (fullscreen) 12f else 8f
+    val insetWidth = mainWidth * 0.34f
+    val insetHeight = insetWidth * 9 / 16
+    return listOf(MultiViewFrame(left, top, mainWidth, mainHeight),
+        MultiViewFrame(left + mainWidth - insetWidth - margin, top + mainHeight - insetHeight - margin, insetWidth, insetHeight))
+}
+
 @Composable
 fun MultiViewScreen(state: AppState) {
     val ui = state.multiView
@@ -104,19 +131,37 @@ fun MultiViewScreen(state: AppState) {
         listOf(ui.firstKey, ui.secondKey).mapIndexed { i, key -> lineup.firstOrNull { it.key == key } ?: slots.getOrNull(i)?.channel }
     }
     var pickerSlot by remember { mutableIntStateOf(-1) }
+    var controlsVisible by remember { mutableStateOf(true) }
+    var interaction by remember { mutableIntStateOf(0) }
+    var wakeKey by remember { mutableIntStateOf(-1) }
     val controls = remember { listOf("pick-0", "pick-1", "watch", "layout", "stop", "pane-0", "pane-1", "retry-0", "retry-1").associateWith { FocusRequester() } }
     val scope = rememberCoroutineScope()
-    fun visibleControl(requested: String): String = when (requested) {
-        "stop" -> if (active) requested else "pick-${ui.focusedSlot}"
-        "retry-0" -> if (slots[0].status == TwoChannelPlayer.Status.ERROR) requested else "pick-0"
-        "retry-1" -> if (slots[1].status == TwoChannelPlayer.Status.ERROR) requested else "pick-1"
-        else -> requested.takeIf { it in controls } ?: "pick-${ui.focusedSlot}"
+    fun visibleControl(requested: String): String {
+        if (active && !controlsVisible) return "pane-${ui.focusedSlot}"
+        return when (requested) {
+            "stop" -> if (active) requested else "pick-${ui.focusedSlot}"
+            "retry-0" -> if (slots[0].status == TwoChannelPlayer.Status.ERROR) requested else "pick-0"
+            "retry-1" -> if (slots[1].status == TwoChannelPlayer.Status.ERROR) requested else "pick-1"
+            else -> requested.takeIf { it in controls } ?: "pick-${ui.focusedSlot}"
+        }
     }
     fun returnFocus() {
-        ui.focusedControl = visibleControl(ui.focusedControl)
-        scope.launch { requestAttachedFocus(controls.getValue(ui.focusedControl)) }
+        val target = visibleControl(ui.focusedControl)
+        ui.focusedControl = target
+        scope.launch { requestAttachedFocus(controls.getValue(target)) { pickerSlot < 0 && ui.focusedControl == target } }
     }
-    fun choose(slot: Int) { ui.focusedSlot = slot; ui.focusedControl = "pick-$slot"; pickerSlot = slot }
+    fun revealControls(focus: Boolean = true) {
+        controlsVisible = true; interaction++
+        if (focus) { ui.focusedControl = "pick-${ui.focusedSlot}"; returnFocus() }
+    }
+    fun hideControls() {
+        controlsVisible = false; ui.focusedControl = "pane-${ui.focusedSlot}"
+        returnFocus()
+    }
+    fun choose(slot: Int) {
+        ui.focusedSlot = slot; ui.focusedControl = "pick-$slot"; pickerSlot = slot
+        if (active) { controlsVisible = true; interaction++ }
+    }
     fun listen(slot: Int) {
         ui.focusedSlot = slot
         if (active && slots[slot].status == TwoChannelPlayer.Status.ERROR) choose(slot)
@@ -125,28 +170,81 @@ fun MultiViewScreen(state: AppState) {
     }
     fun tune(slot: Int, channel: Channel): Boolean {
         if (!TwoChannelPlayer.play(slot, channel)) return false
-        ui.choose(slot, channel)
-        Repo.prefs.lastChannelKey = channel.key
+        ui.choose(slot, channel); Repo.prefs.lastChannelKey = channel.key
         return true
     }
     fun leave() { TwoChannelPlayer.stop(); state.tab = Tab.GUIDE; state.requestNavigation() }
 
-    DisposableEffect(Unit) {
-        TwoChannelPlayer.init(context)
-        onDispose { TwoChannelPlayer.stop() }
+    DisposableEffect(Unit) { TwoChannelPlayer.init(context); onDispose { TwoChannelPlayer.stop() } }
+    LaunchedEffect(active) {
+        if (active) { state.navigationFocused = false; controlsVisible = true; interaction++ }
+        else controlsVisible = true
     }
-    LaunchedEffect(state.restoreFocus, active, slots.map { it.status }) {
+    LaunchedEffect(active, controlsVisible, interaction, pickerSlot) {
+        if (active && controlsVisible && pickerSlot < 0) { delay(5_000); hideControls() }
+    }
+    LaunchedEffect(state.restoreFocus, active, controlsVisible, slots.map { it.status }) {
         val target = visibleControl(ui.focusedControl)
-        if (state.restoreFocus || (target != ui.focusedControl && !state.navigationFocused && pickerSlot < 0)) {
+        if (state.restoreFocus || (target != ui.focusedControl && (active || !state.navigationFocused) && pickerSlot < 0)) {
             ui.focusedControl = target
-            if (requestAttachedFocus(controls.getValue(target))) state.restoreFocus = false
+            if (requestAttachedFocus(controls.getValue(target)) { pickerSlot < 0 && ui.focusedControl == target }) state.restoreFocus = false
         }
     }
-    BackHandler(enabled = pickerSlot < 0 && !state.navigationFocused) { leave() }
+    BackHandler(enabled = pickerSlot < 0 && (active || !state.navigationFocused)) {
+        if (active && controlsVisible) hideControls() else leave()
+    }
 
-    BoxWithConstraints(Modifier.fillMaxSize().onPreviewKeyEvent { event ->
+    @Composable fun layoutButton() {
+        PillButton(if (ui.pictureInPicture) "Picture in Picture" else "Side by side", {
+            ui.pictureInPicture = !ui.pictureInPicture; interaction++
+        }, Modifier.focusRequester(controls.getValue("layout")).testTag("dual-layout"), onFocus = { if (it) ui.focusedControl = "layout" })
+    }
+    @Composable fun channelButton(slot: Int, modifier: Modifier) {
+        FocusBox(onClick = { choose(slot) }, modifier = modifier.height(44.dp).focusRequester(controls.getValue("pick-$slot")).testTag("dual-pick-$slot"),
+            color = Palette.surface2, focusedColor = Palette.focus, focusedScale = 1.02f,
+            onFocus = { if (it) { ui.focusedSlot = slot; ui.focusedControl = "pick-$slot" } }) { focused ->
+            Column(Modifier.padding(horizontal = 12.dp).align(Alignment.CenterStart)) {
+                Text("CHANNEL ${slot + 1}", color = if (focused) Palette.onFocus else Palette.dim, fontSize = 9.sp, lineHeight = 12.sp, fontWeight = FontWeight.Bold)
+                Text(selected[slot]?.name ?: "Choose a channel", color = if (focused) Palette.onFocus else Palette.text, fontSize = 14.sp, lineHeight = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
+    @Composable fun watchButton() {
+        PillButton(if (active) "Audio: Game ${audioSlot + 1}" else "Watch both", {
+            if (active) { listen(1 - audioSlot); interaction++; return@PillButton }
+            val first = selected[0]; val second = selected[1]
+            when {
+                first == null -> choose(0)
+                second == null -> choose(1)
+                first.key == second.key || first.url == second.url -> Toasts.show("Choose two different channels.")
+                else -> {
+                    if (TwoChannelPlayer.play(0, first) && TwoChannelPlayer.play(1, second)) {
+                        Repo.prefs.lastChannelKey = if (audioSlot == 0) first.key else second.key
+                        ui.focusedControl = "pane-${ui.focusedSlot}"; returnFocus()
+                    } else Toasts.show("The selected channels could not start. Try another channel.")
+                }
+            }
+        }, Modifier.focusRequester(controls.getValue("watch")).testTag("dual-watch"), primary = true, onFocus = { if (it) ui.focusedControl = "watch" })
+    }
+    @Composable fun retryButtons() {
+        slots.forEachIndexed { slot, playback -> if (playback.status == TwoChannelPlayer.Status.ERROR) {
+            PillButton("Retry ${slot + 1}", { TwoChannelPlayer.retry(slot); interaction++ },
+                Modifier.focusRequester(controls.getValue("retry-$slot")).testTag("dual-retry-$slot"),
+                onFocus = { if (it) { ui.focusedSlot = slot; ui.focusedControl = "retry-$slot" } })
+        } }
+    }
+
+    BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black).onPreviewKeyEvent { event ->
         val code = event.nativeKeyEvent.keyCode
-        if (pickerSlot < 0 && code in listOf(AndroidKeyEvent.KEYCODE_CHANNEL_UP, AndroidKeyEvent.KEYCODE_CHANNEL_DOWN, AndroidKeyEvent.KEYCODE_PAGE_UP, AndroidKeyEvent.KEYCODE_PAGE_DOWN)) {
+        if (wakeKey == code) {
+            if (event.type == KeyEventType.KeyUp) wakeKey = -1
+            true
+        } else if (pickerSlot < 0 && active && code in listOf(AndroidKeyEvent.KEYCODE_DPAD_CENTER, AndroidKeyEvent.KEYCODE_ENTER,
+                AndroidKeyEvent.KEYCODE_DPAD_UP, AndroidKeyEvent.KEYCODE_DPAD_DOWN, AndroidKeyEvent.KEYCODE_DPAD_LEFT, AndroidKeyEvent.KEYCODE_DPAD_RIGHT, AndroidKeyEvent.KEYCODE_MENU)
+            && (!controlsVisible || code == AndroidKeyEvent.KEYCODE_MENU)) {
+            if (event.type == KeyEventType.KeyDown) { wakeKey = code; revealControls() }
+            true
+        } else if (pickerSlot < 0 && code in listOf(AndroidKeyEvent.KEYCODE_CHANNEL_UP, AndroidKeyEvent.KEYCODE_CHANNEL_DOWN, AndroidKeyEvent.KEYCODE_PAGE_UP, AndroidKeyEvent.KEYCODE_PAGE_DOWN)) {
             if (event.type == KeyEventType.KeyDown && event.nativeKeyEvent.repeatCount == 0) {
                 val slot = ui.focusedSlot
                 if (!active) choose(slot)
@@ -157,112 +255,82 @@ fun MultiViewScreen(state: AppState) {
                     if (choices.isNotEmpty()) {
                         val index = choices.indexOfFirst { it.key == current?.key }.coerceAtLeast(0)
                         val next = choices[Math.floorMod(index + if (code == AndroidKeyEvent.KEYCODE_CHANNEL_UP || code == AndroidKeyEvent.KEYCODE_PAGE_UP) 1 else -1, choices.size)]
-                        tune(slot, next)
+                        tune(slot, next); revealControls(focus = false)
                     }
                 }
             }
             true
-        } else false
+        } else { if (active && event.type == KeyEventType.KeyDown) interaction++; false }
     }) {
         val compact = maxWidth < 720.dp
-        Column(Modifier.fillMaxSize().padding(horizontal = if (compact) 20.dp else 28.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Column(Modifier.weight(1f)) {
-                    Text("Two games. One screen.", color = Palette.text, fontSize = if (compact) 20.sp else 23.sp, fontWeight = FontWeight.Bold)
-                    Text("Choose two channels. Hear one at a time.", color = Palette.dim, fontSize = 12.sp)
+        Column(Modifier.fillMaxSize().padding(horizontal = if (active) 0.dp else if (compact) 20.dp else 28.dp,
+            vertical = if (active) 0.dp else 12.dp), verticalArrangement = Arrangement.spacedBy(if (active) 0.dp else 10.dp)) {
+            if (!active) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Two games. One screen.", color = Palette.text, fontSize = if (compact) 20.sp else 23.sp, fontWeight = FontWeight.Bold)
+                        Text("Choose two channels. Hear one at a time.", color = Palette.dim, fontSize = 12.sp)
+                    }
+                    layoutButton()
                 }
-                PillButton(if (ui.pictureInPicture) "Picture in Picture" else "Side by side", {
-                    ui.pictureInPicture = !ui.pictureInPicture
-                }, Modifier.focusRequester(controls.getValue("layout")), onFocus = { if (it) ui.focusedControl = "layout" })
-                if (active) PillButton("Stop", { TwoChannelPlayer.stop(); ui.focusedControl = "watch"; returnFocus() },
-                    Modifier.focusRequester(controls.getValue("stop")), onFocus = { if (it) ui.focusedControl = "stop" })
-            }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                repeat(2) { slot ->
-                    FocusBox(
-                        onClick = { choose(slot) }, modifier = Modifier.weight(1f).height(44.dp).focusRequester(controls.getValue("pick-$slot")).testTag("dual-pick-$slot"),
-                        color = Palette.surface2, focusedColor = Palette.focus, focusedScale = 1.02f,
-                        onFocus = { if (it) { ui.focusedSlot = slot; ui.focusedControl = "pick-$slot" } },
-                    ) { focused ->
-                        Column(Modifier.padding(horizontal = 12.dp).align(Alignment.CenterStart)) {
-                            Text("CHANNEL ${slot + 1}", color = if (focused) Palette.onFocus else Palette.dim, fontSize = 9.sp, lineHeight = 12.sp, fontWeight = FontWeight.Bold)
-                            Text(selected[slot]?.name ?: "Choose a channel", color = if (focused) Palette.onFocus else Palette.text, fontSize = 14.sp, lineHeight = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                    }
-                }
-                PillButton(if (active) "Audio: Game ${audioSlot + 1}" else "Watch both", {
-                    if (active) {
-                        listen(1 - audioSlot); ui.focusedControl = "pane-${ui.focusedSlot}"; returnFocus()
-                        return@PillButton
-                    }
-                    val first = selected[0]; val second = selected[1]
-                    when {
-                        first == null -> choose(0)
-                        second == null -> choose(1)
-                        first.key == second.key || first.url == second.url -> Toasts.show("Choose two different channels.")
-                        else -> {
-                            if (TwoChannelPlayer.play(0, first) && TwoChannelPlayer.play(1, second)) {
-                                Repo.prefs.lastChannelKey = if (audioSlot == 0) first.key else second.key
-                                ui.focusedControl = "pane-${ui.focusedSlot}"; returnFocus()
-                            } else Toasts.show("The selected channels could not start. Try another channel.")
-                        }
-                    }
-                }, Modifier.focusRequester(controls.getValue("watch")).testTag("dual-watch"), primary = true, onFocus = { if (it) ui.focusedControl = "watch" })
-            }
-            BoxWithConstraints(Modifier.fillMaxWidth().weight(1f)) {
-                if (!ui.pictureInPicture) {
-                    Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        repeat(2) { slot ->
-                            MultiViewPane(slot, selected[slot], slots[slot], active, audioSlot == slot, false,
-                                Modifier.weight(1f).aspectRatio(16f / 9f).focusRequester(controls.getValue("pane-$slot")),
-                                onClick = { listen(slot) }, onFocus = { if (it) { ui.focusedSlot = slot; ui.focusedControl = "pane-$slot" } })
-                        }
-                    }
-                } else {
-                    val stageWidth = minOf(maxWidth, maxHeight * 16f / 9f)
-                    Box(Modifier.width(stageWidth).aspectRatio(16f / 9f).align(Alignment.Center)) {
-                        MultiViewPane(0, selected[0], slots[0], active, audioSlot == 0, false,
-                            Modifier.fillMaxSize().focusRequester(controls.getValue("pane-0")).focusProperties {
-                                right = controls.getValue("pane-1"); down = controls.getValue("pane-1")
-                            },
-                            onClick = { listen(0) }, onFocus = { if (it) { ui.focusedSlot = 0; ui.focusedControl = "pane-0" } })
-                        MultiViewPane(1, selected[1], slots[1], active, audioSlot == 1, true,
-                            Modifier.width(stageWidth * 0.34f).aspectRatio(16f / 9f).align(Alignment.BottomEnd).padding(8.dp).focusRequester(controls.getValue("pane-1")).focusProperties {
-                                left = controls.getValue("pane-0"); up = controls.getValue("pane-0")
-                            },
-                            onClick = { listen(1) }, onFocus = { if (it) { ui.focusedSlot = 1; ui.focusedControl = "pane-1" } })
-                    }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    repeat(2) { channelButton(it, Modifier.weight(1f)) }; watchButton()
                 }
             }
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(if (active) "OK  Listen to a game  ·  CH +/−  Change focused channel" else "Choose channels, then Watch both", color = Palette.dim, fontSize = 11.sp, modifier = Modifier.weight(1f))
-                slots.forEachIndexed { slot, playback ->
-                    if (playback.status == TwoChannelPlayer.Status.ERROR) PillButton("Retry ${slot + 1}", { TwoChannelPlayer.retry(slot) },
-                        Modifier.focusRequester(controls.getValue("retry-$slot")), onFocus = { if (it) { ui.focusedSlot = slot; ui.focusedControl = "retry-$slot" } })
+            key("dual-stage") {
+                BoxWithConstraints(Modifier.fillMaxWidth().weight(1f).testTag("dual-stage").semantics { contentDescription = "Multi View video stage" }) {
+                    val frames = multiViewFrames(maxWidth.value, maxHeight.value, ui.pictureInPicture, active)
+                    repeat(2) { slot -> key(slot) {
+                        val frame = frames[slot]
+                        MultiViewPane(slot, selected[slot], slots[slot], active, audioSlot == slot, ui.pictureInPicture && slot == 1,
+                            Modifier.offset(frame.x.dp, frame.y.dp).size(frame.width.dp, frame.height.dp)
+                                .focusRequester(controls.getValue("pane-$slot")).focusProperties {
+                                    if (slot == 0) { right = controls.getValue("pane-1"); if (active && controlsVisible) down = controls.getValue("pick-0") else if (ui.pictureInPicture) down = controls.getValue("pane-1") }
+                                    else { left = controls.getValue("pane-0"); if (active && controlsVisible) down = controls.getValue("pick-1") else if (ui.pictureInPicture) up = controls.getValue("pane-0") }
+                                },
+                            showChrome = !active, showRing = !active || controlsVisible,
+                            onClick = { if (active && !controlsVisible) revealControls() else listen(slot) },
+                            onFocus = { if (it) { ui.focusedSlot = slot; ui.focusedControl = "pane-$slot" } })
+                    } }
                 }
+            }
+            if (!active) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Choose channels, then Watch both", color = Palette.dim, fontSize = 11.sp, modifier = Modifier.weight(1f)); retryButtons()
                 Text("Back  Live TV", color = Palette.dim, fontSize = 11.sp)
+            }
+        }
+        if (active && controlsVisible) {
+            Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().testTag("dual-controls").semantics { contentDescription = "Multi View controls" }
+                .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.92f))))
+                .padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) { repeat(2) { channelButton(it, Modifier.weight(1f)) } }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    watchButton(); layoutButton()
+                    PillButton("Stop", { TwoChannelPlayer.stop(); ui.focusedControl = "watch"; returnFocus() },
+                        Modifier.focusRequester(controls.getValue("stop")).testTag("dual-stop"), onFocus = { if (it) ui.focusedControl = "stop" })
+                    retryButtons()
+                    Text("OK  Select  ·  CH +/−  Change channel  ·  Back  Hide", color = Palette.dim, fontSize = 10.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                }
             }
         }
     }
     if (pickerSlot >= 0) {
         val slot = pickerSlot
         MultiViewChannelPicker(slot, selected[slot], selected[1 - slot], onChoose = { channel ->
-            if (!active) ui.choose(slot, channel)
-            else if (!tune(slot, channel)) Toasts.show("This channel could not start. Choose another.")
-            pickerSlot = -1; returnFocus()
-        }, onClose = { pickerSlot = -1; returnFocus() })
+            if (!active) ui.choose(slot, channel) else if (!tune(slot, channel)) Toasts.show("This channel could not start. Choose another.")
+            pickerSlot = -1; if (active) { controlsVisible = true; interaction++ }; returnFocus()
+        }, onClose = { pickerSlot = -1; if (active) { controlsVisible = true; interaction++ }; returnFocus() })
     }
 }
-
 @Composable
 private fun MultiViewPane(
     slot: Int, selected: Channel?, playback: TwoChannelPlayer.SlotState, active: Boolean, audible: Boolean, small: Boolean,
-    modifier: Modifier, onClick: () -> Unit, onFocus: (Boolean) -> Unit,
+    modifier: Modifier, showChrome: Boolean, showRing: Boolean, onClick: () -> Unit, onFocus: (Boolean) -> Unit,
 ) {
     val channel = playback.channel ?: selected
     FocusBox(onClick = onClick, modifier = modifier.testTag("dual-pane-$slot").semantics {
         contentDescription = "Channel ${slot + 1}, ${channel?.name ?: "choose a channel"}. ${if (active && audible) "Audio selected" else if (active) "Press OK to listen" else "Press OK to choose"}"
-    }, shape = RoundedCornerShape(12.dp), color = Color.Black, focusedScale = 1f, onFocus = onFocus) { _ ->
+    }, shape = if (active) RectangleShape else RoundedCornerShape(12.dp), color = Color.Black, focusedScale = 1f, ring = showRing, onFocus = onFocus) { _ ->
         Box(Modifier.fillMaxSize()) {
             if (playback.channel != null && active) MultiViewVideo(slot, Modifier.fillMaxSize())
             else Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -275,6 +343,7 @@ private fun MultiViewPane(
                 maxLines = if (small) 2 else 3, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.align(Alignment.Center).background(Color.Black.copy(alpha = 0.85f)).padding(if (small) 8.dp else 16.dp),
             )
+            if (showChrome) {
             Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().height(42.dp).background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.85f), Color.Transparent))))
             Text("${slot + 1}  ${channel?.name ?: "Choose a channel"}", color = Color.White, fontSize = if (small) 10.sp else 13.sp, fontWeight = FontWeight.SemiBold,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.align(Alignment.TopStart).padding(horizontal = 10.dp, vertical = 8.dp))
@@ -282,6 +351,7 @@ private fun MultiViewPane(
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 if (active && audible) Icon(Icons.Rounded.VolumeUp, null, tint = Palette.accent, modifier = Modifier.size(if (small) 12.dp else 16.dp))
                 Text(if (active && audible) "Audio selected" else if (active) "OK  Listen" else "OK  Choose", color = Color.White, fontSize = if (small) 9.sp else 11.sp)
+            }
             }
         }
     }
@@ -294,8 +364,10 @@ private fun MultiViewVideo(slot: Int, modifier: Modifier) {
     AndroidView(factory = { context ->
         (LayoutInflater.from(context).inflate(R.layout.player_texture, null, false) as PlayerView).apply {
             useController = false; isFocusable = false; isFocusableInTouchMode = false; keepScreenOn = true
+            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+            tag = "dual-native-video-$slot"
         }
-    }, update = { view -> if (view.player !== player) view.player = player }, onRelease = { it.player = null }, modifier = modifier)
+    }, update = { view -> if (view.player !== player) view.player = player }, onRelease = { it.player = null }, modifier = modifier.testTag("dual-video-$slot"))
 }
 
 private fun sportsChannels(channels: List<Channel>, categories: List<Category>): List<Channel> {

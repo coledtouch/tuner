@@ -51,6 +51,10 @@
     dualActive = false,
     dualAudio = 0,
     dualMode = "split",
+    dualControls = true,
+    dualFocusId = "dual-pick-0",
+    dualControlsTimer,
+    dualMenuCodes = [],
     dualChannels = [null, null],
     dualStates = [{ status: "idle" }, { status: "idle" }];
   var player = window.TunerPlayer.create({
@@ -87,6 +91,7 @@
     n.onclick = action;
     n.onfocus = function () {
       S.focusId = id;
+      if (dualActive && S.tab === 5 && !S.dialog) dualFocusId = id;
     };
     return n;
   }
@@ -1249,6 +1254,7 @@
         renderPlayerOverlay();
       } else render();
     }
+    if (dualActive && S.tab === 5) scheduleDualControls();
   }
   function renderSearch() {
     main.textContent = "";
@@ -1485,7 +1491,7 @@
       button("About Tuner", "about-tuner", function () {
         showDialog(
           "Tuner for Samsung TV",
-          "Version 1.4.1 · Samsung TV\nLive TV, guide, movies, series and Favorites. Two-channel PiP works on supported TVs and playlists. Embedded torrent playback is not available on Samsung.",
+          "Version 1.4.2 · Samsung TV\nLive TV, guide, movies, series and Favorites. Two-channel PiP works on supported TVs and playlists. Embedded torrent playback is not available on Samsung.",
           []
         );
       })
@@ -1584,6 +1590,11 @@
       closeDialog();
       return;
     }
+    if (dualActive && S.tab === 5) {
+      if (dualControls) hideDualControls();
+      else openTab(0);
+      return;
+    }
     if (S.fullscreen) {
       if (S.zone === "player-actions") {
         S.zone = "video";
@@ -1647,6 +1658,14 @@
   function handleArrow(code) {
     if (S.dialog) {
       moveFocus(dialogLayer, code === 37 || code === 38 ? -1 : 1);
+      return;
+    }
+    if (dualActive && S.tab === 5) {
+      if (!dualControls) showDualControls();
+      else {
+        moveFocus(main, code === 37 || code === 38 ? -1 : 1);
+        scheduleDualControls();
+      }
       return;
     }
     if (S.fullscreen) {
@@ -1771,23 +1790,59 @@
     moveFocus(main, code === 37 || code === 38 ? -1 : 1);
   }
   function stopDual() {
+    clearTimeout(dualControlsTimer);
     if (dual) dual.stop();
     dualActive = false;
+    dualControls = true;
     dualStates = [{ status: "idle" }, { status: "idle" }];
     applyTheme();
+  }
+  function scheduleDualControls() {
+    clearTimeout(dualControlsTimer);
+    if (!dualActive || !dualControls || S.dialog || document.hidden) return;
+    dualControlsTimer = setTimeout(function () {
+      if (dualActive && S.tab === 5 && !S.dialog) hideDualControls();
+    }, 5000);
+  }
+  function hideDualControls() {
+    clearTimeout(dualControlsTimer);
+    if (!dualActive || S.dialog) return;
+    dualControls = false;
+    S.zone = "dual-video";
+    renderMultiView();
+  }
+  function showDualControls() {
+    if (!dualActive || S.tab !== 5) return;
+    dualControls = true;
+    S.zone = "dual-controls";
+    renderMultiView();
+    scheduleDualControls();
+  }
+  function dualAudioButton(slot) {
+    return button(
+      dualAudio === slot ? "🔊 Audio " + (slot + 1) : "Listen to " + (slot + 1),
+      "dual-audio-" + slot,
+      function () {
+        if (dualActive && dual && dual.selectAudio(slot) === false)
+          return toast("Audio could not switch on this TV.");
+        dualAudio = slot;
+        renderMultiView();
+        scheduleDualControls();
+      },
+      dualAudio === slot ? "active" : ""
+    );
   }
   function renderMultiView() {
     applyTheme();
     main.textContent = "";
-    main.appendChild(el("h1", "page-title", "Two games. One screen."));
-    main.appendChild(
-      el(
-        "p",
-        "multiview-subtitle",
-        "Watch two channels together. Choose the channel you want to hear."
-      )
-    );
+    if (!dualActive) {
+      main.appendChild(el("h1", "page-title", "Two games. One screen."));
+      main.appendChild(
+        el("p", "multiview-subtitle", "Watch two channels together. Choose the channel you want to hear.")
+      );
+    }
     var controls = el("div", "dual-controls");
+    controls.id = "dual-controls";
     [0, 1].forEach(function (slot) {
       controls.appendChild(
         button(
@@ -1810,36 +1865,38 @@
         function () {
           dualMode = dualMode === "split" ? "pip" : "split";
           renderMultiView();
+          scheduleDualControls();
         }
       )
     );
-    controls.appendChild(
-      button(
-        dualActive ? "Restart both" : "Watch both",
-        "dual-start",
-        startDual
-      )
-    );
-    if (dualActive)
+    if (dualActive) {
+      controls.appendChild(dualAudioButton(0));
+      controls.appendChild(dualAudioButton(1));
       controls.appendChild(
         button("Stop", "dual-stop", function () {
           stopDual();
           renderMultiView();
         })
       );
-    main.appendChild(controls);
+    } else controls.appendChild(button("Watch both", "dual-start", startDual));
+    var tray = dualActive ? el("div", "dual-tray" + (dualControls ? "" : " hidden")) : main;
+    if (dualActive) tray.id = "dual-tray";
+    tray.appendChild(controls);
     var frames = el(
       "div",
       "dual-frames " + (dualMode === "pip" ? "pip" : "split")
     );
+    frames.onclick = function () {
+      if (dualActive && !dualControls && !S.dialog) showDualControls();
+    };
     [0, 1].forEach(function (slot) {
       var frame = el("div", "dual-frame");
       frame.id = "dual-frame-" + slot;
       frame.appendChild(
         el(
           "div",
-          "dual-label",
-          dualChannels[slot] ? dualChannels[slot].name : "Channel " + (slot + 1)
+          "dual-label" + (dualActive && !dualControls ? " hidden" : ""),
+          (dualAudio === slot ? "🔊 " : "") + (dualChannels[slot] ? dualChannels[slot].name : "Channel " + (slot + 1))
         )
       );
       if (
@@ -1858,31 +1915,31 @@
         );
         frame.appendChild(message);
       }
-      frame.appendChild(
-        button(
-          dualAudio === slot ? "🔊 Audio selected" : "Listen to this game",
-          "dual-audio-" + slot,
-          function () {
-            if (dualActive && dual && dual.selectAudio(slot) === false)
-              return toast("Audio could not switch on this TV.");
-            dualAudio = slot;
-            renderMultiView();
-          },
-          dualAudio === slot ? "active" : ""
-        )
-      );
+      if (!dualActive) frame.appendChild(dualAudioButton(slot));
       frames.appendChild(frame);
     });
     main.appendChild(frames);
-    main.appendChild(
+    tray.appendChild(
       el(
         "p",
         "dual-footer",
-        "Uses both playlist streams. Stop this playlist on other TVs first.  ·  Back Tabs  ·  Leaving stops both games"
+        dualActive
+          ? "OK / Arrows Controls  ·  Back Hide controls, then leave Multi View"
+          : "Uses both playlist streams. Stop this playlist on other TVs first.  ·  Back Tabs  ·  Leaving stops both games"
       )
     );
-    if (dualActive) applyDualRects();
-    if (S.zone === "nav") focus("tab-" + S.nav);
+    if (dualActive) {
+      main.appendChild(tray);
+      applyDualRects();
+      if (dualControls) {
+        S.zone = "dual-controls";
+        focus(document.getElementById(dualFocusId) ? dualFocusId : "dual-pick-0");
+      } else {
+        main.tabIndex = -1;
+        main.focus();
+        S.focusId = null;
+      }
+    } else if (S.zone === "nav") focus("tab-" + S.nav);
     else
       focus(
         S.focusId && document.getElementById(S.focusId)
@@ -1891,6 +1948,8 @@
       );
   }
   function pickDualChannel(slot) {
+    clearTimeout(dualControlsTimer);
+    dualFocusId = "dual-pick-" + slot;
     S.dialog = true;
     dialogLayer.className = "";
     dialogLayer.textContent = "";
@@ -1919,9 +1978,10 @@
             function () {
               if (dualChannels[1 - slot] && dualChannels[1 - slot].id === c.id)
                 return toast("Choose a different channel for the second game.");
+              var previous = dualChannels[slot];
               dualChannels[slot] = c;
               closeDialog(false);
-              if (dualActive && dual)
+              if (dualActive && dual && (!previous || previous.id !== c.id || previous.url !== c.url))
                 dual.play(slot, {
                   url: c.url,
                   backups: c.backups,
@@ -1930,6 +1990,7 @@
                   id: c.id,
                 });
               renderMultiView();
+              scheduleDualControls();
             },
             "episode"
           )
@@ -1975,6 +2036,8 @@
           },
         });
       dualActive = true;
+      dualControls = true;
+      dualFocusId = "dual-pick-0";
       dualStates = [{ status: "loading" }, { status: "loading" }];
       renderMultiView();
       dualChannels.forEach(function (c, slot) {
@@ -1988,6 +2051,7 @@
       });
       dual.selectAudio(dualAudio);
       applyDualRects();
+      scheduleDualControls();
     } catch (e) {
       stopDual();
       toast("Two-channel playback is not supported by this TV.");
@@ -1996,20 +2060,11 @@
   }
   function applyDualRects() {
     if (!dual || !dualActive || S.tab !== 5) return;
-    var scale = window.innerWidth / 1920;
-    dual.setRects(
-      [0, 1].map(function (slot) {
-        var r = document
-          .getElementById("dual-frame-" + slot)
-          .getBoundingClientRect();
-        return {
-          left: r.left / scale + 2,
-          top: r.top / scale + 2,
-          width: r.width / scale - 4,
-          height: r.height / scale - 4,
-        };
-      })
-    );
+    // The app stage is always logical 1920x1080, independent of CSS scale or controls.
+    // AVPlay LETTER_BOX preserves each stream's own aspect ratio inside these bounds.
+    dual.setRects(dualMode === "pip"
+      ? [{ left: 0, top: 0, width: 1920, height: 1080 }, { left: 1312, top: 32, width: 576, height: 324 }]
+      : [{ left: 0, top: 270, width: 960, height: 540 }, { left: 960, top: 270, width: 960, height: 540 }]);
   }
   function applyTheme() {
     var nativeVisible =
@@ -2022,6 +2077,7 @@
     document.body.className =
       (store.settings.theme === "midnight" ? "" : "black") +
       (S.fullscreen ? " fullscreen" : "") +
+      (dualActive && S.tab === 5 ? " multiview-fullscreen" : "") +
       (nativeVisible ? " native-video" : "");
   }
   function canHoldFavorite() {
@@ -2065,8 +2121,14 @@
       if (!e.repeat) back();
       return;
     }
+    if (dualActive && S.tab === 5 && dualMenuCodes.indexOf(code) >= 0) {
+      e.preventDefault();
+      showDualControls();
+      return;
+    }
     if (code === 13) {
       e.preventDefault();
+      if (dualActive && dualControls && !S.dialog) scheduleDualControls();
       if (!enterDown) {
         enterDown = Date.now();
         enterHeld = false;
@@ -2132,6 +2194,15 @@
         document.activeElement.click();
       return;
     }
+    if (dualActive && S.tab === 5) {
+      if (!dualControls) showDualControls();
+      else {
+        if (document.activeElement && document.activeElement.click)
+          document.activeElement.click();
+        scheduleDualControls();
+      }
+      return;
+    }
     if (S.fullscreen) {
       if (
         S.zone === "player-actions" &&
@@ -2161,10 +2232,14 @@
   document.addEventListener("visibilitychange", function () {
     if (document.hidden) {
       saveRecent();
+      clearTimeout(dualControlsTimer);
       if (dualActive && dual) dual.suspend();
       else player.suspend();
     } else {
-      if (dualActive && dual) dual.restore();
+      if (dualActive && dual) {
+        dual.restore();
+        scheduleDualControls();
+      }
       else {
         player.restore();
         resumeGuidePreview();
@@ -2199,13 +2274,21 @@
       "MediaStop",
       "Guide",
       "ColorF0Red",
+      "Menu",
+      "Tools",
     ].forEach(function (name) {
       if (
         supported.some(function (k) {
           return k.name === name;
         })
       )
-        window.tizen.tvinputdevice.registerKey(name);
+        {
+          window.tizen.tvinputdevice.registerKey(name);
+          if (name === "Menu" || name === "Tools") {
+            var menuKey = supported.filter(function (k) { return k.name === name; })[0];
+            dualMenuCodes.push(menuKey.code);
+          }
+        }
     });
   } catch (e) {}
   setInterval(function () {

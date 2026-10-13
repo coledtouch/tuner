@@ -875,6 +875,83 @@ body.black #topbar nav button.active {
   color: #aab6c8;
   font-size: 22px;
 }
+body.multiview-fullscreen #background {
+  background: #000;
+}
+body.multiview-fullscreen #topbar {
+  display: none;
+}
+body.multiview-fullscreen #main {
+  position: absolute;
+  inset: 0;
+  width: 1920px;
+  height: 1080px;
+  padding: 0;
+  outline: none;
+}
+body.multiview-fullscreen .dual-frames {
+  position: absolute;
+  inset: 0;
+  width: 1920px;
+  height: 1080px;
+}
+body.multiview-fullscreen .dual-frame {
+  border: 0;
+  border-radius: 0;
+}
+body.multiview-fullscreen .dual-frames.split .dual-frame {
+  left: 0;
+  top: 270px;
+  width: 960px;
+  height: 540px;
+}
+body.multiview-fullscreen .dual-frames.split #dual-frame-1 {
+  left: 960px;
+}
+body.multiview-fullscreen .dual-frames.pip #dual-frame-0 {
+  left: 0;
+  top: 0;
+  width: 1920px;
+  height: 1080px;
+}
+body.multiview-fullscreen .dual-frames.pip #dual-frame-1 {
+  left: 1312px;
+  right: auto;
+  top: 32px;
+  bottom: auto;
+  width: 576px;
+  height: 324px;
+  border: 2px solid #ffffffb3;
+  border-radius: 12px;
+}
+.dual-tray {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 4;
+  padding: 80px 48px 28px;
+  background: linear-gradient(transparent, #000e 46%, #000f);
+}
+.dual-tray .dual-controls {
+  height: 76px;
+}
+.dual-tray .dual-controls button {
+  font-size: 24px;
+  padding: 16px 22px;
+  margin-right: 12px;
+  white-space: nowrap;
+}
+.dual-tray .dual-picker {
+  width: 330px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dual-tray .dual-footer {
+  font-size: 20px;
+  margin-top: 12px;
+  color: #c2cbd7;
+}
 #topbar nav button {
   font-size: 27px;
   padding: 23px 22px;
