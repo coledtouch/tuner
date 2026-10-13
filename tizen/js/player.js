@@ -19,7 +19,7 @@
     for (i = 0; i < nativeOwners.length; i += 1) {
       if (nativeOwners[i].manager === manager) { return nativeOwners[i]; }
     }
-    var record = { manager: manager, owner: null, dual: false };
+    var record = { manager: manager, owner: null, dual: false, appliedMuted: null, audioActive: false };
     nativeOwners.push(record);
     return record;
   }
@@ -131,6 +131,8 @@
         if (ownership.owner === api) {
           // close is legal in every AVPlay state and cancels pending preparation.
           try { av.close(); } catch (ignore) {}
+          ownership.appliedMuted = null;
+          ownership.audioActive = false;
         }
       } else if (video) {
         removeHtmlListeners();
@@ -243,9 +245,22 @@
     }
     function applyAudio(force) {
       if (!audioPending || !av || ownership.owner !== api || suspended || (!force && operation)) { return; }
+      if (ownership.appliedMuted === muted) { audioPending = false; return; }
       var method = muted ? 'disableAudioStream' : 'enableAudioStream';
       if (typeof av[method] !== 'function') { throw new Error('DualAudioUnsupported'); }
       av[method]();
+      ownership.appliedMuted = muted;
+      if (!muted) {
+        // Samsung automatically silences the other active instance. Remember
+        // that change: disabling it again can throw InvalidAccessError on TV.
+        for (var i = 0; i < nativeOwners.length; i += 1) {
+          var peer = nativeOwners[i], peerState = '';
+          if (peer !== ownership && peer.owner && peer.audioActive && peer.appliedMuted === false) {
+            try { peerState = peer.manager.getState(); } catch (ignorePeerState) {}
+            if (/^(IDLE|READY|PLAYING|PAUSED)$/.test(peerState)) { peer.appliedMuted = true; }
+          }
+        }
+      }
       audioPending = false;
     }
     function syncIntent(t) {
@@ -296,6 +311,8 @@
       operation = 'prepare';
       try {
         av.open(sources[sourceIndex]);
+        ownership.appliedMuted = null;
+        ownership.audioActive = true;
         if (options.multiviewResource) {
           try {
             av.setStreamingProperty('IN_APP_MULTIVIEW', options.multiviewResource === 'sub' ?
@@ -528,12 +545,18 @@
       return { audio: trackCache.audio.slice(), subtitles: trackCache.subtitles.slice() };
     };
     api.setMuted = function (value) {
+      var previousMuted = muted, previousPending = audioPending;
       muted = !!value;
       if (!av) { if (video) { video.muted = muted; } return true; }
       audioPending = true;
       if (!prepared || suspended || operation || ownership.owner !== api) { return true; }
       try { applyAudio(false); return true; }
-      catch (ignore) { report('This TV could not switch the audio. Please retry.'); return false; }
+      catch (ignore) {
+        muted = previousMuted;
+        audioPending = previousPending || ownership.appliedMuted !== muted;
+        report('This TV could not switch the audio. Please retry.');
+        return false;
+      }
     };
     api.selectTrack = function (type, index) {
       var key = /^(audio|AUDIO)$/.test(type) ? 'audio' : (/^(subtitles|subtitle|TEXT)$/.test(type) ? 'subtitles' : '');
@@ -556,6 +579,7 @@
       if (!state.request || suspended || state.status === 'error') { return; }
       rememberPosition();
       suspended = true;
+      if (ownership && ownership.owner === api) { ownership.audioActive = false; }
       clearWait();
       if (av && prepared && !operation) {
         try { av.suspend(); nativeSuspended = true; }
@@ -575,6 +599,7 @@
           av.restoreAsync(null, state.request.live ? null : state.position, false, function () {
             if (!current(t) || suspended) { return; }
             operation = ''; nativeSuspended = false; prepared = true;
+            ownership.audioActive = true;
             readDuration(); drainNative(t);
           }, function () { if (current(t) && !suspended) { openSource(state.position); } });
         } catch (ignore) { openSource(state.position); }

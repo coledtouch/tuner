@@ -29,7 +29,7 @@ function timers() {
   };
 }
 
-function avplay() {
+function avplay(audioGroup) {
   const calls = [], prepares = [], seeks = [], restores = [];
   let state = 'NONE', listener = {}, currentTime = 0, duration = 90000, busy = '', saved = null;
   const tracks = [
@@ -45,15 +45,27 @@ function avplay() {
   const av = {
     calls, prepares, seeks, restores,
     getState() { return state; },
-    open(url) { legal('open', ['NONE', 'IDLE']); state = 'IDLE'; currentTime = 0; calls.at(-1).push(url); },
+    open(url) { legal('open', ['NONE', 'IDLE']); state = 'IDLE'; currentTime = 0; av.audioEnabled = true; calls.at(-1).push(url); },
     close() { calls.push(['close']); state = 'NONE'; busy = ''; },
     setListener(value) { legal('setListener', ['IDLE']); listener = value; },
     setDisplayRect(...args) { legal('setDisplayRect', ['IDLE', 'READY', 'PLAYING', 'PAUSED']); calls.at(-1).push(...args); },
     setDisplayMethod(value) { legal('setDisplayMethod', ['IDLE', 'READY', 'PLAYING', 'PAUSED']); calls.at(-1).push(value); },
     setTimeoutForBuffering(seconds) { legal('setTimeoutForBuffering', ['IDLE']); calls.at(-1).push(seconds); },
     setStreamingProperty(type, value) { legal('setStreamingProperty', ['IDLE']); calls.at(-1).push(type, value); },
-    enableAudioStream() { legal('enableAudioStream', ['IDLE', 'READY', 'PLAYING', 'PAUSED']); av.audioEnabled = true; },
-    disableAudioStream() { legal('disableAudioStream', ['IDLE', 'READY', 'PLAYING', 'PAUSED']); av.audioEnabled = false; },
+    enableAudioStream() {
+      legal('enableAudioStream', ['IDLE', 'READY', 'PLAYING', 'PAUSED']);
+      for (const other of audioGroup || []) {
+        if (other !== av && other.getState() !== 'NONE') { other.audioEnabled = false; }
+      }
+      av.audioEnabled = true;
+    },
+    disableAudioStream() {
+      legal('disableAudioStream', ['IDLE', 'READY', 'PLAYING', 'PAUSED']);
+      if (audioGroup && av.audioEnabled === false && state !== 'IDLE') {
+        throw { name: 'InvalidAccessError', message: 'PLAYER_ERROR_INVALID_OPERATION' };
+      }
+      av.audioEnabled = false;
+    },
     prepareAsync(ok, error) {
       legal('prepareAsync', ['IDLE']); busy = 'prepare';
       prepares.push({ ok, error, listener, url: calls.filter(x => x[0] === 'open').at(-1)[1] });
@@ -83,6 +95,7 @@ function avplay() {
     event(name, ...args) { if (name === 'oncurrentplaytime') { currentTime = args[0]; } listener[name](...args); },
     set duration(value) { duration = value; }
   };
+  if (audioGroup) { audioGroup.push(av); }
   return av;
 }
 
@@ -326,7 +339,7 @@ test('browser autoplay rejection is recoverable by Play without exhausting backu
 });
 
 function dualHarness(version = '8.0') {
-  const h = harness(), managers = [avplay(), avplay()];
+  const h = harness(), audioGroup = [], managers = [avplay(audioGroup), avplay(audioGroup)];
   let allocated = 0;
   h.window.tizen = { systeminfo: { getCapability() { return version; } } };
   h.window.webapis.avplaystore = { getPlayer() {
@@ -362,6 +375,56 @@ test('native dual view prepares two independent main/sub players and changes aud
   assert.equal(h.managers[0].prepares.length, 1, 'PiP layout does not reconnect');
   dual.stop(); assert.equal(h.managers[0].getState(), 'NONE'); assert.equal(h.managers[1].getState(), 'NONE');
   assert.equal(h.clock.size, 0);
+});
+
+test('initial parallel dual startup tolerates repeated main audio choice without disabling sub twice', () => {
+  const h = dualHarness(), dual = h.makeDual();
+  dual.play(0, { url: 'https://example.test/game1.ts', live: true });
+  dual.play(1, { url: 'https://example.test/game2.ts', live: true });
+  assert.equal(h.managers[0].prepares.length, 1);
+  assert.equal(h.managers[1].prepares.length, 1, 'both streams prepare immediately');
+  assert.equal(dual.selectAudio(0), true, 'the UI confirms main audio while both prepare');
+  h.managers[0].completePrepare(); h.managers[1].completePrepare();
+  assert.equal(h.managers[0].getState(), 'PLAYING');
+  assert.equal(h.managers[1].getState(), 'PLAYING');
+  assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false);
+  assert.equal(h.managers[1].calls.filter(c => c[0] === 'disableAudioStream').length, 1);
+  assert.equal(h.states.filter(entry => entry.state.status === 'error').length, 0);
+});
+
+test('native audio switching adopts automatic peer silence and repeated selections make no extra calls', () => {
+  const h = dualHarness(), dual = h.makeDual();
+  dual.play(0, { url: 'https://example.test/game1.ts', live: true });
+  dual.play(1, { url: 'https://example.test/game2.ts', live: true });
+  h.managers[0].completePrepare(); h.managers[1].completePrepare();
+  for (const selected of [1, 0, 1]) {
+    assert.equal(dual.selectAudio(selected), true);
+    assert.equal(h.managers[selected].audioEnabled, true);
+    assert.equal(h.managers[1 - selected].audioEnabled, false);
+    const before = h.managers.map(manager => manager.calls.length);
+    assert.equal(dual.selectAudio(selected), true);
+    assert.deepEqual(h.managers.map(manager => manager.calls.length), before, 'confirming the same choice is a no-op');
+  }
+  assert.equal(h.managers[0].calls.filter(c => c[0] === 'disableAudioStream').length, 0);
+  assert.equal(h.managers[1].calls.filter(c => c[0] === 'disableAudioStream').length, 1, 'only initial IDLE mute is needed');
+  assert.equal(h.managers[0].prepares.length, 1); assert.equal(h.managers[1].prepares.length, 1);
+});
+
+test('reopening a muted dual stream resets applied audio state and mutes the new stream once', () => {
+  const h = dualHarness(), dual = h.makeDual();
+  dual.play(0, { url: 'https://example.test/game1.ts', live: true });
+  dual.play(1, { url: 'https://example.test/game2.ts', live: true });
+  h.managers[0].completePrepare(); h.managers[1].completePrepare();
+  dual.play(1, { url: 'https://example.test/game3.ts', live: true });
+  assert.equal(dual.selectAudio(0), true); h.managers[1].completePrepare();
+  assert.equal(h.managers[0].getState(), 'PLAYING'); assert.equal(h.managers[1].getState(), 'PLAYING');
+  assert.equal(h.managers[1].audioEnabled, false);
+  assert.equal(h.managers[1].calls.filter(c => c[0] === 'disableAudioStream').length, 2);
+  dual.stop(); dual.play(0, { url: 'https://example.test/game1.ts', live: true });
+  dual.play(1, { url: 'https://example.test/game2.ts', live: true });
+  h.managers[0].completePrepare(); h.managers[1].completePrepare();
+  assert.equal(h.managers[1].calls.filter(c => c[0] === 'disableAudioStream').length, 3);
+  assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false);
 });
 
 test('dual audio choice queues during preparation and native instances are reused across sessions', () => {
@@ -425,6 +488,28 @@ test('dual suspend/restore returns both actual players without replacing their U
   assert.equal(h.managers[0].prepares.length, 1); assert.equal(h.managers[1].prepares.length, 1);
 });
 
+test('changing audio while suspended works in either native restore completion order', () => {
+  for (const previouslySelected of [0, 1]) {
+    for (const firstRestored of [0, 1]) {
+      const h = dualHarness(), dual = h.makeDual();
+      dual.play(0, { url: 'https://example.test/game1.ts', live: true });
+      dual.play(1, { url: 'https://example.test/game2.ts', live: true });
+      h.managers[0].completePrepare(); h.managers[1].completePrepare();
+      assert.equal(dual.selectAudio(previouslySelected), true);
+      dual.suspend();
+      const chosen = 1 - previouslySelected;
+      assert.equal(dual.selectAudio(chosen), true);
+      dual.restore();
+      h.managers[firstRestored].completeRestore(); h.managers[1 - firstRestored].completeRestore();
+      assert.equal(h.managers[chosen].audioEnabled, true);
+      assert.equal(h.managers[1 - chosen].audioEnabled, false,
+        'the previously chosen player must mute even if it restores last');
+      assert.equal(h.managers[0].getState(), 'PLAYING'); assert.equal(h.managers[1].getState(), 'PLAYING');
+      assert.equal(h.states.filter(entry => entry.state.status === 'error').length, 0);
+    }
+  }
+});
+
 test('desktop dual preview uses two real HTML videos with one chosen audio stream', async () => {
   const h = harness(false), videos = [htmlVideo(), htmlVideo()];
   const dual = h.window.TunerPlayer.createDual({ videoElements: videos });
@@ -443,9 +528,35 @@ test('audio switch failures keep the previous native audio selection and never r
   dual.play(0, { url: 'https://example.test/game1.ts', live: true });
   dual.play(1, { url: 'https://example.test/game2.ts', live: true });
   h.managers[0].completePrepare(); h.managers[1].completePrepare();
+  const enable = h.managers[1].enableAudioStream;
   h.managers[1].enableAudioStream = function () { throw { name: 'NotSupportedError' }; };
   assert.equal(dual.selectAudio(1), false);
   assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[0].getState(), 'PLAYING');
   assert.equal(h.managers[1].getState(), 'PLAYING');
   assert.equal(h.managers[0].prepares.length, 1); assert.equal(h.managers[1].prepares.length, 1);
+  h.managers[1].enableAudioStream = enable;
+  dual.suspend(); dual.restore();
+  h.managers[0].completeRestore(); h.managers[1].completeRestore();
+  assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false,
+    'a failed audio choice must not be applied by a later restore');
+  assert.equal(dual.selectAudio(1), true, 'the same choice can be retried after the native failure clears');
+  assert.equal(h.managers[0].audioEnabled, false); assert.equal(h.managers[1].audioEnabled, true);
+  assert.equal(h.managers[0].prepares.length, 1); assert.equal(h.managers[1].prepares.length, 1);
 });
+
+test('failed native mute changes restore desired intent before later playback synchronization', () => {
+  const h = harness();
+  h.player.play({ url: 'https://example.test/a.ts', live: true }); h.av.completePrepare();
+  assert.equal(h.player.setMuted(true), true);
+  const enable = h.av.enableAudioStream;
+  h.av.enableAudioStream = function () { throw { name: 'NotSupportedError' }; };
+  assert.equal(h.player.setMuted(false), false);
+  h.av.enableAudioStream = enable;
+  h.player.pause(); h.player.resume();
+  assert.equal(h.av.audioEnabled, false, 'Play must retain the mute intent that preceded the failed change');
+  h.player.suspend(); h.player.restore(); h.av.completeRestore();
+  assert.equal(h.av.audioEnabled, false, 'Restore must also retain that prior intent without a new audio selection');
+  assert.equal(h.player.setMuted(false), true);
+  assert.equal(h.av.audioEnabled, true, 'an explicit retry can apply the requested change');
+});
+
