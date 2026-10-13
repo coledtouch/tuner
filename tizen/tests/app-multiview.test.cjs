@@ -89,11 +89,11 @@ function harness() {
     suspend() { playerCalls.push('suspend'); }, restore() { playerCalls.push('restore'); },
     play(request) { this.state = { status: 'playing', request }; playerCalls.push(['play', request.id]); }
   };
-  let dualOptions, clientOptions, dualCreates = 0;
+  let dualOptions, clientOptions, dualCreates = 0, audioResult = true;
   const dual = {
     play(slot, request) { dualCalls.push(['play', slot, request.id]); dualOptions.onState(slot, { status: 'playing', request }); },
     setRects(value) { rects.push(JSON.parse(JSON.stringify(value))); },
-    selectAudio(slot) { dualCalls.push(['audio', slot]); return true; },
+    selectAudio(slot) { dualCalls.push(['audio', slot]); return audioResult; },
     stop() { dualCalls.push(['stop']); }, suspend() { dualCalls.push(['suspend']); }, restore() { dualCalls.push(['restore']); }
   };
   const registeredKeys = [];
@@ -141,6 +141,7 @@ function harness() {
   return {
     document, node, key, advance, start, pick, dualCalls, playerCalls, rects, registeredKeys,
     state(slot, value) { dualOptions.onState(slot, value); },
+    audioResult(value) { audioResult = value; },
     visibility(hidden) { document.hidden = hidden; (documentEvents.visibilitychange || []).forEach(fn => fn()); },
     unload() { (windowEvents.beforeunload || []).forEach(fn => fn()); },
     refresh() { clientOptions.onCatalog('live', channels.slice(), []); },
@@ -183,6 +184,98 @@ test('layout and selected audio change without reopening either feed', () => {
   assert.deepEqual(h.dualCalls.at(-1), ['audio', 1]);
   h.node('dual-layout').click(); assert.equal(h.rects.at(-1)[1].left, 960);
   assert.deepEqual(h.dualCalls.filter(call => call[0] === 'play'), before);
+});
+
+test('PiP hides video-frame chrome with the tray and keeps both native surfaces available', () => {
+  const h = harness(); h.start(); h.node('dual-layout').click();
+  const objects = [h.node('dual-object-0'), h.node('dual-object-1')];
+  const calls = h.dualCalls.filter(call => call[0] === 'play');
+  assert.match(h.node('dual-frame-1').className, /has-picture/);
+  assert.match(h.node('dual-frame-1').parentNode.className, /controls-visible/);
+  h.advance(5000);
+  assert.match(h.node('dual-frame-1').parentNode.className, /controls-hidden/);
+  assert.ok(h.node('dual-frame-1').offsetWidth > 0, 'A playing inset retains its video bounds');
+  assert.equal(h.node('dual-frame-1').querySelector('.dual-label').offsetWidth, 0);
+  assert.equal(h.document.activeElement.id, 'main');
+  h.key(13);
+  assert.match(h.node('dual-frame-1').parentNode.className, /controls-visible/);
+  assert.ok(h.node('dual-frame-1').querySelector('.dual-label').offsetWidth > 0);
+  assert.deepEqual(objects, [h.node('dual-object-0'), h.node('dual-object-1')]);
+  assert.deepEqual(h.dualCalls.filter(call => call[0] === 'play'), calls);
+});
+
+test('unavailable PiP slot leaves no empty overlay while watching and exposes its status on OK', () => {
+  const h = harness(); h.start(); h.node('dual-layout').click(); h.advance(5000);
+  const objects = [h.node('dual-object-0'), h.node('dual-object-1')];
+  const calls = h.dualCalls.filter(call => call[0] === 'play');
+  for (const status of ['idle', 'loading', 'error', 'stopped']) {
+    h.state(1, { status, error: 'Fixture stream unavailable' });
+    assert.equal(h.node('dual-frame-1').offsetWidth, 0, status + ' must not leave an empty inset');
+    assert.ok(h.node('dual-frame-0').offsetWidth > 0, 'Main picture remains available');
+    assert.equal(h.document.activeElement.id, 'main');
+    h.key(13);
+    assert.ok(h.node('dual-frame-1').offsetWidth > 0, 'Status is visible when controls return');
+    assert.doesNotMatch(h.node('dual-frame-1').className, /has-picture/);
+    const message = h.node('dual-frame-1').querySelector('.dual-message');
+    assert.ok(message.offsetWidth > 0, 'Status message is visible');
+    assert.match(message.textContent, status === 'loading' ? /Connecting/ : status === 'error' ? /Fixture stream unavailable/ : /stopped/);
+    assert.equal(h.document.activeElement.id, 'dual-pick-0');
+    h.advance(5000);
+  }
+  h.state(1, { status: 'playing' });
+  assert.ok(h.node('dual-frame-1').offsetWidth > 0, 'Recovered picture is restored without opening a new feed');
+  assert.equal(h.node('dual-frame-1').querySelector('.dual-message'), null);
+  assert.match(h.node('dual-frame-1').parentNode.className, /controls-hidden/);
+  assert.deepEqual(objects, [h.node('dual-object-0'), h.node('dual-object-1')]);
+  assert.deepEqual(h.dualCalls.filter(call => call[0] === 'play'), calls);
+});
+
+test('selected channel terminal failure transfers audio to the healthy channel without reopening either feed', () => {
+  const h = harness(); h.start(); h.node('dual-layout').click(); h.advance(5000);
+  const objects = [h.node('dual-object-0'), h.node('dual-object-1')];
+  const plays = h.dualCalls.filter(call => call[0] === 'play');
+  const count = h.dualCalls.length;
+  h.state(0, { status: 'error', error: 'Fixture channel failed' });
+  assert.deepEqual(h.dualCalls.slice(count), [['audio', 1]]);
+  assert.match(h.node('dual-audio-1').className, /active/);
+  assert.equal(h.node('dual-frame-0').offsetWidth, 0);
+  h.state(0, { status: 'error', error: 'Fixture channel failed' });
+  assert.deepEqual(h.dualCalls.slice(count), [['audio', 1]], 'Repeated error does not repeat audio operations');
+  h.key(13);
+  assert.match(h.node('dual-frame-0').querySelector('.dual-message').textContent, /Fixture channel failed/);
+  assert.deepEqual(h.dualCalls.filter(call => call[0] === 'play'), plays);
+  assert.deepEqual(objects, [h.node('dual-object-0'), h.node('dual-object-1')]);
+  assert.equal(h.creates, 1);
+});
+
+test('failed automatic audio transfer retains its selection and error without retrying each callback', () => {
+  const h = harness(); h.start(); h.audioResult(false);
+  const count = h.dualCalls.length;
+  h.state(0, { status: 'error', error: 'Fixture channel failed' });
+  assert.deepEqual(h.dualCalls.slice(count), [['audio', 1]]);
+  assert.match(h.node('dual-audio-0').className, /active/);
+  assert.doesNotMatch(h.node('dual-audio-1').className, /active/);
+  assert.match(h.node('dual-frame-0').querySelector('.dual-message').textContent, /Fixture channel failed/);
+  h.state(0, { status: 'error', error: 'Fixture channel failed again' });
+  assert.deepEqual(h.dualCalls.slice(count), [['audio', 1]]);
+  assert.match(h.node('dual-frame-0').querySelector('.dual-message').textContent, /failed again/);
+  assert.equal(h.dualCalls.filter(call => call[0] === 'play').length, 2);
+});
+
+test('automatic audio transfer ignores transient, unselected, stopped and unhealthy-peer states', () => {
+  for (const status of ['idle', 'loading', 'paused', 'playing', 'stopped']) {
+    const h = harness(); h.start(); const count = h.dualCalls.length;
+    h.state(0, { status });
+    assert.equal(h.dualCalls.length, count, status + ' does not change audio');
+  }
+  const h = harness(); h.start(); const count = h.dualCalls.length;
+  h.state(1, { status: 'error' });
+  h.state(0, { status: 'error' });
+  assert.equal(h.dualCalls.length, count, 'An unselected failure or failed peer does not transfer audio');
+  const stopped = harness(); stopped.start(); stopped.node('dual-stop').click();
+  const afterStop = stopped.dualCalls.length;
+  stopped.state(1, { status: 'playing' }); stopped.state(0, { status: 'error' });
+  assert.equal(stopped.dualCalls.length, afterStop, 'Late callbacks after stop do not enable audio');
 });
 
 test('picker stays open past hide deadline, same channel keeps playback, replacement changes only one slot', () => {

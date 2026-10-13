@@ -20,7 +20,7 @@
     for (i = 0; i < nativeOwners.length; i += 1) {
       if (nativeOwners[i].manager === manager) { return nativeOwners[i]; }
     }
-    var record = { manager: manager, owner: null, dual: false, appliedMuted: null, audioActive: false };
+    var record = { manager: manager, owner: null, dual: false, appliedMuted: null, audioActive: false, audioPeerRetry: false };
     nativeOwners.push(record);
     return record;
   }
@@ -189,6 +189,7 @@
           try { av.close(); } catch (ignore) {}
           ownership.appliedMuted = null;
           ownership.audioActive = false;
+          ownership.audioPeerRetry = false;
         }
       } else if (video) {
         removeHtmlListeners();
@@ -325,12 +326,17 @@
     }
     function applyAudio(force) {
       if (!audioPending || !av || ownership.owner !== api || suspended || (!force && operation)) { return; }
+      ownership.audioPeerRetry = false;
       if (ownership.appliedMuted === muted) { audioPending = false; return; }
       var method = muted ? 'disableAudioStream' : 'enableAudioStream';
       if (typeof av[method] !== 'function') { throw new Error('DualAudioUnsupported'); }
       try { av[method](); }
       catch (error) {
         forgetAudioState();
+        // Some M7 routes reject enable until the previous route is released.
+        // Only the synchronous, prepared dual PLAYING failure permits that retry.
+        ownership.audioPeerRetry = !muted && !!options.multiviewResource && prepared && !operation &&
+          nativeState() === 'PLAYING' && error && error.name === 'InvalidAccessError' && error.code === 15;
         if (muted || !options.multiviewResource || !prepared || operation ||
             nativeState() !== 'PLAYING' || !audioTypeMismatch(error)) { throw error; }
         // M7 firmware can apply enableAudioStream, then throw TypeMismatch(17).
@@ -402,6 +408,7 @@
         av.open(sources[sourceIndex]);
         ownership.appliedMuted = null;
         ownership.audioActive = true;
+        ownership.audioPeerRetry = false;
         if (options.multiviewResource) {
           try {
             av.setStreamingProperty('IN_APP_MULTIVIEW', options.multiviewResource === 'sub' ?
@@ -639,8 +646,9 @@
       }
       return { audio: trackCache.audio.slice(), subtitles: trackCache.subtitles.slice() };
     };
-    api.setMuted = function (value) {
+    api.setMuted = function (value, quiet) {
       var previousMuted = muted, previousPending = audioPending;
+      if (ownership) { ownership.audioPeerRetry = false; }
       muted = !!value;
       if (!av) { if (video) { video.muted = muted; } return true; }
       audioPending = true;
@@ -649,7 +657,7 @@
       catch (ignore) {
         muted = previousMuted;
         audioPending = previousPending || ownership.appliedMuted !== muted;
-        report('This TV could not switch the audio. Please retry.');
+        if (!quiet) { report('This TV could not switch the audio. Please retry.'); }
         return false;
       }
     };
@@ -789,20 +797,33 @@
     };
     api.selectAudio = function (slot) {
       if ((slot !== 0 && slot !== 1) || !capability.supported) { return false; }
-      var previous = audioSlot;
+      if (!players[slot].state.request || /^(idle|error)$/.test(players[slot].state.status)) { return false; }
+      var previous = audioSlot, releasedPeer = false, enabled, retry = false;
       // enableAudioStream automatically silences the other active instance.
       // Enable the chosen player first so a failure retains the previous audio.
-      if (!players[slot].setMuted(false)) {
-        players[previous].setMuted(false);
-        return false;
+      enabled = players[slot].setMuted(false, true);
+      if (!enabled && native) {
+        for (var ownerIndex = 0; ownerIndex < nativeOwners.length; ownerIndex += 1) {
+          var record = nativeOwners[ownerIndex];
+          if (record.owner === players[slot]) { retry = record.audioPeerRetry; break; }
+        }
       }
-      if (!players[1 - slot].setMuted(true)) {
-        players[slot].setMuted(slot !== previous);
-        players[1 - slot].setMuted(1 - slot !== previous);
-        return false;
+      if (retry) {
+        releasedPeer = true;
+        // A failed mute can still release the TV's stale audio reservation.
+        // Do not adopt that failure; the chosen route must succeed or pass the
+        // disable-verified code17 workaround before selection can change.
+        players[previous].setMuted(true, true);
+        enabled = players[slot].setMuted(false, true);
       }
-      audioSlot = slot;
-      return true;
+      if (enabled && players[1 - slot].setMuted(true, true)) {
+        audioSlot = slot;
+        return true;
+      }
+      if (releasedPeer || enabled) { players[1 - previous].setMuted(true, true); }
+      players[previous].setMuted(false, true);
+      if (options.onError) { options.onError(slot, 'This TV could not switch the audio. Please retry.'); }
+      return false;
     };
     api.stop = function () {
       if (closed) { return; }

@@ -1491,7 +1491,7 @@
       button("About Tuner", "about-tuner", function () {
         showDialog(
           "Tuner for Samsung TV",
-          "Version 1.4.4 · Samsung TV\nLive TV, guide, movies, series and Favorites. Two-channel PiP works on supported TVs and playlists. Embedded torrent playback is not available on Samsung.",
+          "Version 1.4.5 · Samsung TV\nLive TV, guide, movies, series and Favorites. Two-channel PiP works on supported TVs and playlists. Embedded torrent playback is not available on Samsung.",
           []
         );
       })
@@ -1884,13 +1884,17 @@
     tray.appendChild(controls);
     var frames = el(
       "div",
-      "dual-frames " + (dualMode === "pip" ? "pip" : "split")
+      "dual-frames " + (dualMode === "pip" ? "pip" : "split") +
+        (dualActive ? (dualControls ? " controls-visible" : " controls-hidden") : "")
     );
     frames.onclick = function () {
       if (dualActive && !dualControls && !S.dialog) showDualControls();
     };
     [0, 1].forEach(function (slot) {
-      var frame = el("div", "dual-frame");
+      var slotStatus = dualStates[slot].status;
+      var hasPicture = slotStatus === "playing" || slotStatus === "paused";
+      var frame = el("div", "dual-frame" + (hasPicture ? " has-picture" : "") +
+        (dualActive && !dualControls && !hasPicture ? " hidden" : ""));
       frame.id = "dual-frame-" + slot;
       frame.appendChild(
         el(
@@ -1899,19 +1903,17 @@
           (dualAudio === slot ? "🔊 " : "") + (dualChannels[slot] ? dualChannels[slot].name : "Channel " + (slot + 1))
         )
       );
-      if (
-        !dualActive ||
-        dualStates[slot].status === "error" ||
-        dualStates[slot].status === "loading"
-      ) {
+      if (!dualActive || !hasPicture) {
         var message = el(
           "div",
           "dual-message",
-          dualStates[slot].status === "error"
+          slotStatus === "error"
             ? dualStates[slot].error || "This stream could not start"
-            : dualStates[slot].status === "loading"
+            : slotStatus === "loading"
               ? "Connecting…"
-              : "Choose a channel above, then Watch both."
+              : dualActive
+                ? "This channel has stopped. Choose a channel above."
+                : "Choose a channel above, then Watch both."
         );
         frame.appendChild(message);
       }
@@ -2031,7 +2033,14 @@
             document.getElementById("dual-video-1"),
           ],
           onState: function (slot, state) {
+            var previousStatus = dualStates[slot].status;
             dualStates[slot] = state;
+            var other = 1 - slot;
+            if (dualActive && dual && state.status === "error" && previousStatus !== "error" &&
+                slot === dualAudio && dualStates[other].status === "playing" &&
+                dual.selectAudio(other) === true) {
+              dualAudio = other;
+            }
             if (S.tab === 5 && !S.dialog) renderMultiView();
           },
         });
