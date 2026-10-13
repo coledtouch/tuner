@@ -347,7 +347,12 @@
         rememberPeerSilence();
         try { av.enableAudioStream(); }
         catch (retryError) {
-          if (!audioTypeMismatch(retryError)) { forgetAudioState(); throw retryError; }
+          if (!audioTypeMismatch(retryError)) {
+            forgetAudioState();
+            ownership.audioPeerRetry = prepared && !operation && nativeState() === 'PLAYING' &&
+              retryError && retryError.name === 'InvalidAccessError' && retryError.code === 15;
+            throw retryError;
+          }
           // The same verified firmware error on re-enable is a false negative.
         }
       }

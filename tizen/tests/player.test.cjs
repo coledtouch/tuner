@@ -570,6 +570,31 @@ test('a peer mute false negative can release its reservation but only a verified
   assert.deepEqual(h.managers.map(manager => manager.prepares.length), [1, 1]);
 });
 
+test('code15 on the verified M7 re-enable also permits one peer-release retry', () => {
+  const h = playingDual(), enable = h.managers[1].enableAudioStream;
+  let reserved = true, attempts = 0, releases = 0;
+  h.managers[1].enableAudioStream = function () {
+    assert.equal(this, h.managers[1]); attempts++;
+    if (attempts > 1 && reserved) { throw { name: 'InvalidAccessError', code: 15 }; }
+    enable.call(this); throw { name: 'TypeMismatchError', code: 17 };
+  };
+  h.managers[0].disableAudioStream = function () {
+    assert.equal(this, h.managers[0]); releases++; reserved = false;
+    assert.equal(h.managers[0].audioEnabled, false, 'the first applied enable already silenced the old route');
+    throw { name: 'InvalidAccessError', code: 15 };
+  };
+  assert.equal(h.dual.selectAudio(1), true);
+  assert.equal(attempts, 4, 'the failed verified re-enable leads to one target retry and its verification');
+  assert.equal(releases, 1);
+  assert.equal(h.managers[0].audioEnabled, false); assert.equal(h.managers[1].audioEnabled, true);
+  assert.deepEqual(h.audioErrors, []);
+  const before = h.managers.map(manager => manager.calls.length);
+  assert.equal(h.dual.selectAudio(1), true);
+  assert.deepEqual(h.managers.map(manager => manager.calls.length), before);
+  assert.deepEqual(h.managers.map(manager => manager.prepares.length), [1, 1]);
+  assert.equal(h.allocated, 2);
+});
+
 test('failed peer-first retry is bounded and re-enables the previous route with one final error', () => {
   const h = playingDual();
   const targetEnable = h.managers[1].enableAudioStream;
