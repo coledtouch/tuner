@@ -44,6 +44,7 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -71,6 +72,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -871,11 +873,15 @@ private fun GuideFooter(row: Int, total: Int, future: Boolean, compact: Boolean,
 }
 
 @Composable
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 private fun ProgramDetailsDialog(c: Channel, p: Program, onWatch: () -> Unit, onClose: () -> Unit) {
     val first = remember { FocusRequester() }
+    val parentInput = LocalInputModeManager.current
     BackHandler { onClose() }
-    LaunchedEffect(Unit) { delay(40); runCatching { first.requestFocus() } }
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+      // Keep the remote's input mode consistent when Compose creates a separate window owner.
+      CompositionLocalProvider(LocalInputModeManager provides parentInput) {
+      LaunchedEffect(Unit) { requestAttachedFocus(first) }
         Box(Modifier.fillMaxSize().dimBackground(0.7f), contentAlignment = Alignment.Center) {
             Column(
                 Modifier.padding(24.dp).widthIn(max = 560.dp).fillMaxWidth().heightIn(max = 420.dp)
@@ -896,6 +902,7 @@ private fun ProgramDetailsDialog(c: Channel, p: Program, onWatch: () -> Unit, on
                     PillButton("Watch channel now", onWatch, Modifier.focusRequester(first), primary = true)
                     PillButton("Close", onClose)
                 }
+      }
             }
         }
     }

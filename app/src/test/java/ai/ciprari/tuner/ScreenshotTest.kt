@@ -1,12 +1,10 @@
 package ai.ciprari.tuner
 
 import android.graphics.Bitmap
-import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
-import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.core.view.drawToBitmap
 import androidx.compose.ui.test.onRoot
@@ -14,8 +12,6 @@ import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.isDialog
-import androidx.compose.ui.test.isRoot
-import androidx.compose.ui.test.onLast
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.assertIsFocused
@@ -55,10 +51,18 @@ class ScreenshotTest {
     private val out = File(System.getProperty("user.dir"), "build/screens").apply { mkdirs() }
 
     private fun shot(name: String) {
+        rule.runOnIdle { androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications() }
         repeat(3) { rule.mainClock.advanceTimeByFrame() }
         rule.waitForIdle()
         org.robolectric.shadows.ShadowLooper.idleMainLooper()
-        val bmp = rule.onAllNodes(isRoot()).onLast().captureToImage().asAndroidBitmap()
+        repeat(3) { rule.mainClock.advanceTimeByFrame() }
+        rule.waitForIdle()
+        val dialog = org.robolectric.shadows.ShadowDialog.getLatestDialog()
+        val view = if (dialog?.isShowing == true) dialog.window!!.decorView else rule.activity.window.decorView.rootView
+        // Draw the active window directly; PixelCopy is unavailable in Robolectric.
+        view.measure(android.view.View.MeasureSpec.makeMeasureSpec(view.width, android.view.View.MeasureSpec.EXACTLY), android.view.View.MeasureSpec.makeMeasureSpec(view.height, android.view.View.MeasureSpec.EXACTLY))
+        view.layout(0, 0, view.width, view.height)
+        val bmp = view.drawToBitmap()
         File(out, "$name.png").outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
     }
 
@@ -134,9 +138,17 @@ class ScreenshotTest {
         shot("03_guide_right4")
         rule.onRoot().performKeyInput { pressKey(Key.Enter) }
         rule.mainClock.advanceTimeBy(600)
+        rule.runOnIdle {
+            // Robolectric does not deliver the window-focus event Android sends to a modal.
+            org.robolectric.shadows.ShadowDialog.getLatestDialog().window!!.decorView.dispatchWindowFocusChanged(true)
+            androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+        }
+        rule.onNodeWithText("Watch channel now").performSemanticsAction(SemanticsActions.RequestFocus) { it() }
+        rule.onNodeWithText("Watch channel now").assertIsFocused()
         shot("04_future_details")
         println("stackA=" + state.stack.size)
         rule.onNode(isDialog()).performKeyInput { pressKey(Key.DirectionRight); pressKey(Key.Enter) }
+        rule.runOnIdle { androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications() }
         rule.mainClock.advanceTimeBy(600)
         rule.onRoot().performKeyInput { repeat(10) { pressKey(Key.DirectionDown) }; pressKey(Key.DirectionLeft) }
         rule.mainClock.advanceTimeBy(600)
@@ -167,10 +179,10 @@ class ScreenshotTest {
         rule.setContent { KeyboardMode { TunerTheme { HomeScreen(state) } } }
         rule.mainClock.advanceTimeBy(800)
         shot("16_compact_guide")
-        rule.runOnIdle { state.tab = Tab.MOVIES; state.restoreFocus = true }
+        rule.runOnIdle { state.tab = Tab.MOVIES; state.restoreFocus = true; androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications() }
         rule.mainClock.advanceTimeBy(800)
         shot("17_compact_movies")
-        rule.runOnIdle { state.tab = Tab.SERIES; state.restoreFocus = true }
+        rule.runOnIdle { state.tab = Tab.SERIES; state.restoreFocus = true; androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications() }
         rule.mainClock.advanceTimeBy(800)
         shot("18_compact_series")
     }
@@ -213,6 +225,7 @@ class ScreenshotTest {
         rule.runOnIdle {
             assertTrue(state.top is ai.ciprari.tuner.ui.Screen.MovieDetail)
             state.pop()
+            androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
         }
         rule.mainClock.advanceTimeBy(800)
         rule.runOnIdle {
