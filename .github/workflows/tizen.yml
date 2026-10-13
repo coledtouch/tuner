@@ -32,9 +32,10 @@ jobs:
       - name: Verify sources and behavior
         run: npm run check && npm test
       - name: Build unsigned staging widget
-        run: npm run build
+        run: node tools/build.js "$RUNNER_TEMP/tuner-samsung"
       - uses: actions/upload-artifact@v7
         with:
           name: tuner-samsung-unsigned-staging
-          path: ../output/tizen/*UNSIGNED.wgt
+          path: ${{ runner.temp }}/tuner-samsung/*UNSIGNED.wgt
+          if-no-files-found: error
           retention-days: 14
