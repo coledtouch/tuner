@@ -131,12 +131,13 @@ class MultiViewFullscreenTest {
                 val viewport = onMain { bounds(window.window.decorView) }
                 assertTrue("The activity viewport must be landscape", viewport.width() > viewport.height())
                 waitUntil("Picture in Picture did not use the complete activity viewport") { onMain { bounds(views[0]) == viewport } }
-                val stage = taggedBounds("dual-stage") ?: describedBounds("Multi View video stage")
-                assertNotNull("The fullscreen video stage was not accessible", stage)
-                assertEquals("Navigation reserved space above the active video stage", viewport, stage)
                 status("pip-full-viewport", viewport, onMain { views.map(::bounds) })
 
                 waitUntil("The active controls did not hide automatically", 8_000) { !visibleTag("dual-layout") }
+                // Accessibility reports only the uncovered part of the stage while the tray overlays it.
+                waitUntil("The unobscured accessible stage did not cover the complete viewport") {
+                    (taggedBounds("dual-stage") ?: describedBounds("Multi View video stage")) == viewport
+                }
                 assertStable(window, players, views, textures, surfaceTextures, mediaIds)
                 assertFalse("The hidden tray brought navigation back", hasNavigation("Live TV"))
                 key(KeyEvent.KEYCODE_DPAD_CENTER)
