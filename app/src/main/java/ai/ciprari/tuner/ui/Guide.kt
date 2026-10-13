@@ -55,6 +55,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -91,6 +92,7 @@ import ai.ciprari.tuner.data.Repo
 import ai.ciprari.tuner.player.PlayerHolder
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.collectLatest
 
 const val CAT_ALL = "__all"
 const val CAT_FAV = "__fav"
@@ -254,10 +256,11 @@ fun GuideScreen(state: AppState) {
     }
 
     // Fill guide gaps for whatever rows are on screen.
-    val firstVisible = g.list.firstVisibleItemIndex
-    LaunchedEffect(firstVisible, lineup, epgVersion) {
-        delay(350)
-        if (lineup.isNotEmpty()) Repo.requestShortEpg(lineup.subList(firstVisible.coerceAtMost(lineup.lastIndex), (firstVisible + 12).coerceAtMost(lineup.size)))
+    LaunchedEffect(lineup, epgVersion) {
+        snapshotFlow { g.list.firstVisibleItemIndex }.collectLatest { firstVisible ->
+            delay(350)
+            if (lineup.isNotEmpty()) Repo.requestShortEpg(lineup.subList(firstVisible.coerceAtMost(lineup.lastIndex), (firstVisible + 12).coerceAtMost(lineup.size)))
+        }
     }
 
     // Number keys: type a channel number, it tunes after a short pause.

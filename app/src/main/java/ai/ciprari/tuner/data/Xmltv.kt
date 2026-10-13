@@ -64,7 +64,7 @@ object Xmltv {
                             addName(ChannelMatch.key(n), chId!!, ChannelMatch.isRegional(n))
                         }
                         "icon" -> if (chId != null) {
-                            parser.getAttributeValue(null, "src")?.takeIf { it.startsWith("http") }?.let { icons.putIfAbsent(chId!!, it) }
+                            parser.getAttributeValue(null, "src")?.takeIf { it.startsWith("http") }?.let { icons.getOrPut(chId!!) { it } }
                         }
                         "programme" -> {
                             pChan = parser.getAttributeValue(null, "channel")?.lowercase()

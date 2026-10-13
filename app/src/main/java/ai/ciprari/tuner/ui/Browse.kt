@@ -29,7 +29,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -304,11 +303,11 @@ private fun PosterCard(item: BrowseItem, modifier: Modifier, onFocused: () -> Un
 @Composable
 private fun Hero(item: BrowseItem, label: String, height: Dp, inset: Dp, compact: Boolean, dense: Boolean) {
     // Debounce focus changes. The repository also caches movie details across visits.
-    val info by produceState<ai.ciprari.tuner.data.MovieInfo?>(null, item.key) {
-        value = null
-        val movie = item.movie ?: return@produceState
+    var info by remember(item.key, item.movie?.id) { mutableStateOf<ai.ciprari.tuner.data.MovieInfo?>(null) }
+    LaunchedEffect(item.key, item.movie?.id) {
+        val movie = item.movie ?: return@LaunchedEffect
         delay(650)
-        value = Repo.movieInfo(movie)
+        info = Repo.movieInfo(movie)
     }
     val backdrop = item.heroBackdrop ?: info?.backdrop
     val plot = item.heroPlot ?: info?.plot
