@@ -1492,7 +1492,7 @@
       button("About Tuner", "about-tuner", function () {
         showDialog(
           "Tuner for Samsung TV",
-          "Version 1.4.7 · Samsung TV\nLive TV, guide, movies, series and Favorites. Two-channel PiP works on supported TVs and playlists. Embedded torrent playback is not available on Samsung.",
+          "Version 1.4.8 · Samsung TV\nLive TV, guide, movies, series and Favorites. Two-channel PiP works on supported TVs and playlists. Embedded torrent playback is not available on Samsung.",
           []
         );
       })
@@ -1832,6 +1832,14 @@
       id: c.id,
     });
   }
+  function playDualChannels() {
+    // Finish SUB's synchronous mute/resource setup before MAIN opens with
+    // its default audio. Neither stream waits for the other's preparation.
+    var first = dual.capability && dual.capability.native ? 1 : 0;
+    var firstStarted = playDualChannel(first);
+    var secondStarted = playDualChannel(1 - first);
+    return firstStarted !== false && secondStarted !== false;
+  }
   function promoteDualChannel(slot) {
     if (!dualActive || !dual || dualRestarting || !dualChannels[0] || !dualChannels[1]) return false;
     dualRestarting = true;
@@ -1845,7 +1853,7 @@
       dualAudio = 0;
       dualStates = [{ status: "loading" }, { status: "loading" }];
       applyDualRects();
-      if (playDualChannel(0) === false || playDualChannel(1) === false)
+      if (!playDualChannels())
         throw new Error("DualRestartFailed");
       success = true;
     } catch (error) {
@@ -2103,8 +2111,7 @@
       dualFocusId = "dual-pick-0";
       dualStates = [{ status: "loading" }, { status: "loading" }];
       renderMultiView();
-      playDualChannel(0);
-      playDualChannel(1);
+      playDualChannels();
       if (!dualNeedsMainAudio() && !(dual.capability && dual.capability.native))
         dual.selectAudio(dualAudio);
       applyDualRects();

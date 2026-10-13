@@ -100,7 +100,7 @@ function harness(options = {}) {
       dualCalls.push(['play', slot, request.id]);
       if (slot === rejectedPlay) throw new Error('Fixture open failure');
       activeRequests.set(slot, request); maxStreams = Math.max(maxStreams, activeRequests.size);
-      dualOptions.onState(slot, { status: 'playing', request }); return true;
+      dualOptions.onState(slot, { status: options.loadingSub && slot === 1 ? 'loading' : 'playing', request }); return true;
     },
     setRects(value) { rects.push(JSON.parse(JSON.stringify(value))); },
     selectAudio(slot) {
@@ -307,7 +307,7 @@ test('native prepared audio failure closes both streams before promoting the cho
   const objects = [h.node('dual-object-0'), h.node('dual-object-1')];
   const settings = JSON.stringify(h.settings), count = h.dualCalls.length;
   h.failWithMainAudio(); h.node('dual-audio-1').click();
-  assert.deepEqual(h.dualCalls.slice(count), [['audio', 1], ['stop'], ['play', 0, 'live:1'], ['play', 1, 'live:0']]);
+  assert.deepEqual(h.dualCalls.slice(count), [['audio', 1], ['stop'], ['play', 1, 'live:0'], ['play', 0, 'live:1']]);
   assert.deepEqual(h.activeIds, ['live:1', 'live:0']);
   assert.match(h.node('dual-pick-0').textContent, /NFL Network/);
   assert.match(h.node('dual-pick-1').textContent, /ESPN/);
@@ -330,7 +330,7 @@ test('known MAIN-only audio can swap repeatedly while retaining split bounds, co
   assert.deepEqual(h.activeIds, ['live:1', 'live:0']);
   h.node('dual-audio-1').click();
   assert.deepEqual(h.activeIds, ['live:0', 'live:1']);
-  assert.deepEqual(h.dualCalls.slice(count), [['stop'], ['play', 0, 'live:1'], ['play', 1, 'live:0'], ['stop'], ['play', 0, 'live:0'], ['play', 1, 'live:1']]);
+  assert.deepEqual(h.dualCalls.slice(count), [['stop'], ['play', 1, 'live:0'], ['play', 0, 'live:1'], ['stop'], ['play', 1, 'live:1'], ['play', 0, 'live:0']]);
   assert.equal(h.dualCalls.filter(call => call[0] === 'audio').length, 0, 'Known fallback must not probe native audio');
   assert.deepEqual(h.rects.at(-1), [{ left: 0, top: 270, width: 960, height: 540 }, { left: 960, top: 270, width: 960, height: 540 }]);
   assert.equal(h.audioSlot, 0); assert.equal(h.maxStreams, 2); assert.equal(h.creates, 1);
@@ -354,11 +354,26 @@ test('native initial Audio 2 choice becomes MAIN before playback without queuing
   assert.equal(browser.audioSlot, 1, 'Supported browser audio keeps the requested layout and route');
 });
 
+test('native pair starts SUB before MAIN without waiting for SUB to play, while browser pair order stays unchanged', () => {
+  const native = harness({ native: true, loadingSub: true }); native.start();
+  assert.deepEqual(native.dualCalls.filter(call => call[0] === 'play'), [['play', 1, 'live:1'], ['play', 0, 'live:0']]);
+  assert.match(native.node('dual-frame-1').querySelector('.dual-message').textContent, /Connecting/);
+  assert.match(native.node('dual-frame-0').className, /has-picture/, 'MAIN starts while SUB is still connecting');
+  assert.match(native.node('dual-pick-0').textContent, /ESPN/);
+  assert.match(native.node('dual-pick-1').textContent, /NFL Network/);
+  assert.match(native.node('dual-audio-0').className, /active/);
+  assert.equal(native.document.activeElement.id, 'dual-pick-0');
+  assert.equal(native.dualCalls.filter(call => call[0] === 'audio').length, 0);
+  assert.equal(native.creates, 1); assert.equal(native.maxStreams, 2);
+  const browser = harness(); browser.start();
+  assert.deepEqual(browser.dualCalls.filter(call => call[0] === 'play'), [['play', 0, 'live:0'], ['play', 1, 'live:1']]);
+});
+
 test('terminal selected-channel failure uses MAIN fallback without exposing hidden controls or repeating promotion', () => {
   const h = harness({ native: true }); h.start(); h.advance(5000); h.failWithMainAudio();
   const count = h.dualCalls.length;
   h.state(0, { status: 'error', error: 'Fixture channel failed' });
-  assert.deepEqual(h.dualCalls.slice(count), [['audio', 1], ['stop'], ['play', 0, 'live:1'], ['play', 1, 'live:0']]);
+  assert.deepEqual(h.dualCalls.slice(count), [['audio', 1], ['stop'], ['play', 1, 'live:0'], ['play', 0, 'live:1']]);
   assert.deepEqual(h.activeIds, ['live:1', 'live:0']);
   assert.match(h.node('dual-tray').className, /hidden/);
   assert.equal(h.document.activeElement.id, 'main');
@@ -371,7 +386,7 @@ test('terminal selected-channel failure uses MAIN fallback without exposing hidd
 });
 
 test('failed MAIN promotion closes the partial restart and leaves Watch both available without pretending playback succeeded', () => {
-  const h = harness({ native: true, mainAudio: true }); h.start(); h.rejectPlay(1);
+  const h = harness({ native: true, mainAudio: true }); h.start(); h.rejectPlay(0);
   h.node('dual-audio-1').click();
   assert.deepEqual(h.activeIds, [null, null]);
   assert.doesNotMatch(h.document.body.className, /multiview-fullscreen/);
