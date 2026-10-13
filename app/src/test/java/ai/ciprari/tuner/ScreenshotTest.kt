@@ -1,0 +1,212 @@
+package ai.ciprari.tuner
+
+import android.graphics.Bitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.core.view.drawToBitmap
+import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.performKeyInput
+import androidx.compose.ui.test.pressKey
+import ai.ciprari.tuner.data.Category
+import ai.ciprari.tuner.data.Channel
+import ai.ciprari.tuner.data.Movie
+import ai.ciprari.tuner.data.Program
+import ai.ciprari.tuner.data.Repo
+import ai.ciprari.tuner.data.Source
+import ai.ciprari.tuner.data.SourceType
+import ai.ciprari.tuner.ui.AppState
+import ai.ciprari.tuner.ui.HomeScreen
+import ai.ciprari.tuner.ui.Tab
+import ai.ciprari.tuner.ui.TunerTheme
+import ai.ciprari.tuner.ui.floor30
+import org.junit.Before
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
+import java.io.File
+
+@RunWith(RobolectricTestRunner::class)
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+@Config(sdk = [34], qualifiers = "w960dp-h540dp-land-xhdpi")
+@OptIn(ExperimentalTestApi::class)
+class ScreenshotTest {
+    @get:Rule val rule = createAndroidComposeRule<androidx.activity.ComponentActivity>()
+    private val out = File(System.getProperty("user.dir"), "build/screens").apply { mkdirs() }
+
+    private fun shot(name: String) {
+        repeat(3) { rule.mainClock.advanceTimeByFrame() }
+        rule.waitForIdle()
+        val bmp = rule.activity.window.decorView.rootView.drawToBitmap()
+        File(out, "$name.png").outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+    }
+
+    /** TV remotes put Compose in keyboard input mode; tests start in touch mode. */
+    @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+    @androidx.compose.runtime.Composable
+    private fun KeyboardMode(content: @androidx.compose.runtime.Composable () -> Unit) {
+        val im = androidx.compose.ui.platform.LocalInputModeManager.current
+        androidx.compose.runtime.SideEffect { im.requestInputMode(androidx.compose.ui.input.InputMode.Keyboard) }
+        androidx.compose.foundation.layout.Box(
+            androidx.compose.ui.Modifier.fillMaxSize().background(ai.ciprari.tuner.ui.Palette.bg),
+        ) { content() }
+    }
+
+    @Before fun seed() {
+        org.robolectric.shadows.ShadowLog.stream = System.out
+        Repo.prefs.saveSource(Source("s1", "Test", SourceType.XTREAM, "http://h", "u", "p"))
+        Repo.prefs.setActive("s1")
+        Repo.prefs.guidePreview = false
+        val cats = listOf(Category("1", "News"), Category("2", "Sports"), Category("3", "Entertainment"), Category("4", "Kids"), Category("5", "Movies"))
+        val names = listOf("CNN", "ESPN", "HBO", "NBC", "FOX", "ABC", "CBS", "AMC", "TNT", "TBS", "FX", "Nickelodeon", "Disney", "Food Network", "HGTV", "Discovery", "History", "Bravo")
+        val chans = names.mapIndexed { i, n ->
+            Channel("x:$i", 100 + i, n, null, cats[i % cats.size].id, "e$i", "$i", "http://h/live/u/p/$i.ts")
+        }
+        Repo.liveCategories.value = cats
+        Repo.channels.value = chans
+        val titles = listOf("Evening News", "SportsCenter", "House of the Dragon", "Jeopardy!", "The Five", "World News Tonight", "60 Minutes", "Breaking Bad", "NBA on TNT", "Seinfeld", "The Bear", "SpongeBob", "Bluey", "Chopped", "Fixer Upper", "Deadliest Catch", "Pawn Stars", "Real Housewives")
+        val now = System.currentTimeMillis()
+        val start = floor30(now) - 45 * 60_000L
+        val data = HashMap<String, List<Program>>()
+        chans.forEachIndexed { i, c ->
+            if (i == 5) return@forEachIndexed // one channel with no guide data
+            var t = start + (i % 3) * 15 * 60_000L
+            val list = ArrayList<Program>()
+            var k = 0
+            while (t < now + 8 * 3600_000L) {
+                val len = listOf(30, 60, 90, 30, 120)[(i + k) % 5] * 60_000L
+                list += Program(t, t + len, titles[(i + k) % titles.size], "A short description for this airing of the show with a few details about tonight's episode.", if (k % 2 == 0) "Season ${k + 1}" else null)
+                t += len; k++
+            }
+            data[c.key] = list
+        }
+        Repo.putPrograms(data)
+        Repo.movies.value = (1..30).map { Movie("m:$it", "Movie Title $it", null, "7.${it % 10}", (it % 3 + 1).toString(), "http://h/movie/u/p/$it.mp4", it.toLong(), categoryIds = listOf("1", "2", "3")) }
+        Repo.movieCategories.value = listOf(Category("1", "Action"), Category("2", "Comedy"), Category("3", "Drama"))
+    }
+
+    @OptIn(ExperimentalTestApi::class)
+    @Test fun guide() {
+        val state = AppState()
+        rule.mainClock.autoAdvance = false
+        rule.setContent { KeyboardMode { TunerTheme { HomeScreen(state) } } }
+        rule.mainClock.advanceTimeBy(500)
+        shot("01_guide")
+        rule.onRoot().performKeyInput { repeat(3) { pressKey(Key.DirectionDown) } }
+        rule.mainClock.advanceTimeBy(600)
+        shot("02_guide_down3")
+        rule.onRoot().performKeyInput { repeat(4) { pressKey(Key.DirectionRight) } }
+        rule.mainClock.advanceTimeBy(600)
+        shot("03_guide_right4")
+        rule.onRoot().performKeyInput { pressKey(Key.Enter) }
+        rule.mainClock.advanceTimeBy(600)
+        shot("04_future_details")
+        println("stackA=" + state.stack.size)
+        rule.onRoot().performKeyInput { pressKey(Key.DirectionRight); pressKey(Key.Enter) }
+        rule.mainClock.advanceTimeBy(600)
+        rule.onRoot().performKeyInput { repeat(10) { pressKey(Key.DirectionDown) }; pressKey(Key.DirectionLeft) }
+        rule.mainClock.advanceTimeBy(600)
+        shot("05_guide_scrolled")
+        println("stackB=" + state.stack.size)
+    }
+
+    @Test fun movies() {
+        val state = AppState().apply { tab = Tab.MOVIES }
+        rule.mainClock.autoAdvance = false
+        rule.setContent { KeyboardMode { TunerTheme { HomeScreen(state) } } }
+        rule.mainClock.advanceTimeBy(800)
+        shot("06_movies")
+    }
+
+    @Test fun livePlayer() {
+        rule.mainClock.autoAdvance = false
+        val ch = Repo.channels.value
+        rule.setContent { KeyboardMode { TunerTheme { ai.ciprari.tuner.ui.PlayerScreen(ai.ciprari.tuner.data.PlayRequest.Live(ch[2], ch)) {} } } }
+        rule.mainClock.advanceTimeBy(800)
+        shot("07_live_banner")
+        rule.onRoot().performKeyInput { pressKey(Key.DirectionLeft) }
+        rule.mainClock.advanceTimeBy(800)
+        shot("08_live_panel")
+    }
+
+    @Test fun addSource() {
+        rule.mainClock.autoAdvance = false
+        rule.setContent { KeyboardMode { TunerTheme { ai.ciprari.tuner.ui.EditSourceScreen(null, false) {} } } }
+        rule.mainClock.advanceTimeBy(800)
+        rule.onRoot().performKeyInput { pressKey(Key.DirectionDown) }
+        rule.mainClock.advanceTimeBy(400)
+        shot("09_add_source")
+    }
+
+    @Test fun themes() {
+        rule.mainClock.autoAdvance = false
+        val state = AppState()
+        rule.setContent { KeyboardMode { TunerTheme { HomeScreen(state) } } }
+        listOf(ai.ciprari.tuner.ui.Themes.Daylight, ai.ciprari.tuner.ui.Themes.Carbon, ai.ciprari.tuner.ui.Themes.Royal).forEach { t ->
+            ai.ciprari.tuner.ui.Palette.theme = t
+            rule.mainClock.advanceTimeBy(500); rule.waitForIdle(); rule.mainClock.advanceTimeBy(100)
+            shot("10_theme_${t.id}")
+        }
+        ai.ciprari.tuner.ui.Palette.theme = ai.ciprari.tuner.ui.Themes.Midnight
+    }
+
+    @Test fun settings() {
+        rule.mainClock.autoAdvance = false
+        val state = AppState().apply { tab = Tab.SETTINGS }
+        rule.setContent { KeyboardMode { TunerTheme { HomeScreen(state) } } }
+        rule.mainClock.advanceTimeBy(500)
+        rule.onRoot().performKeyInput { repeat(2) { pressKey(Key.DirectionDown) } }
+        rule.mainClock.advanceTimeBy(500)
+        shot("11_settings")
+        rule.onRoot().performKeyInput { pressKey(Key.Enter) }
+        rule.mainClock.advanceTimeBy(500)
+        rule.onRoot().performKeyInput { pressKey(Key.DirectionDown) }
+        rule.mainClock.advanceTimeBy(500)
+        shot("12_theme_sheet")
+        ai.ciprari.tuner.ui.Palette.theme = ai.ciprari.tuner.ui.Themes.Midnight
+    }
+
+    @Test fun phoneSetupAndNativeInput() {
+        rule.mainClock.autoAdvance = false
+        rule.setContent { KeyboardMode { TunerTheme { ai.ciprari.tuner.ui.EditSourceScreen(null, false) {} } } }
+        rule.mainClock.advanceTimeBy(800)
+        // Remote: Down to the Server URL field, OK opens the native input dialog.
+        rule.onRoot().performKeyInput { pressKey(Key.DirectionDown); pressKey(Key.DirectionCenter) }
+        rule.mainClock.advanceTimeBy(300)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        val dlg = org.robolectric.shadows.ShadowAlertDialog.getLatestAlertDialog()
+        println("DIALOG shown=" + (dlg?.isShowing) + " title=" + org.robolectric.Shadows.shadowOf(dlg).title)
+        val edit = findEdit(dlg!!.window!!.decorView)
+        edit!!.setText("http://typed.example:8080")
+        dlg.getButton(android.app.AlertDialog.BUTTON_POSITIVE).performClick()
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        rule.mainClock.advanceTimeBy(300)
+        shot("13_typed_server")
+
+        // Phone page: GET the form, then POST credentials like a phone browser would.
+        val port = listOf(8686, 8687, 8688, 8080).first { runCatching { java.net.Socket("127.0.0.1", it).close() }.isSuccess }
+        val page = java.net.URL("http://127.0.0.1:$port/").readText()
+        println("PAGE has form=" + page.contains("Send to TV"))
+        val conn = java.net.URL("http://127.0.0.1:$port/").openConnection() as java.net.HttpURLConnection
+        conn.requestMethod = "POST"; conn.doOutput = true
+        conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+        conn.outputStream.use { it.write("type=xtream&server=http%3A%2F%2Fphone.example%3A80&username=cole&password=p%40ss&name=Living+Room".toByteArray()) }
+        println("POST code=" + conn.responseCode + " sent=" + conn.inputStream.bufferedReader().readText().contains("Sent to your TV"))
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        rule.mainClock.advanceTimeBy(500)
+        shot("14_from_phone")
+    }
+
+    private fun findEdit(v: android.view.View): android.widget.EditText? = when (v) {
+        is android.widget.EditText -> v
+        is android.view.ViewGroup -> (0 until v.childCount).firstNotNullOfOrNull { findEdit(v.getChildAt(it)) }
+        else -> null
+    }
+}
