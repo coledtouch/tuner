@@ -8,6 +8,7 @@
   var dualManagers = [];
   var dualOwner = null;
   var WAIT_MS = 30000;
+  var PROGRESS_POLL_MS = 5000;
 
   function number(value, fallback) {
     var n = Number(value);
@@ -51,6 +52,12 @@
     var trackCache = { audio: [], subtitles: [] };
     var rect = { left: 0, top: 0, width: 1920, height: 1080 };
     var watchdog = null;
+    var progressTimer = null;
+    var progressAt = 0;
+    var nativePosition = 0;
+    var callbackPosition = 0;
+    var progressConfirmed = false;
+    var silentReopenUsed = false;
     var htmlListeners = [];
 
     function emit(status, error) {
@@ -74,6 +81,54 @@
     }
     function clearWait() {
       if (watchdog !== null) { root.clearTimeout(watchdog); watchdog = null; }
+    }
+    function progressClock() {
+      return root.performance && typeof root.performance.now === 'function' ? root.performance.now() : Date.now();
+    }
+    function clearProgress() {
+      if (progressTimer !== null) { root.clearTimeout(progressTimer); progressTimer = null; }
+    }
+    function noteProgress(position, fromCallback) {
+      var previous = fromCallback ? callbackPosition : nativePosition;
+      if (fromCallback) { callbackPosition = position; } else { nativePosition = position; }
+      // Keep each clock's own cursor, including live timestamp discontinuities.
+      // A muted player may omit callbacks while its readable native clock advances.
+      if (position > previous) {
+        progressAt = progressClock(); progressConfirmed = true;
+        buffering = false; clearWait();
+      }
+    }
+    function startProgress(t) {
+      if (!av || progressTimer !== null || !current(t) || !wantedPlaying || suspended ||
+          !prepared || operation || buffering || ended || ownership.owner !== api) { return; }
+      progressAt = progressClock();
+      nativePosition = state.position; callbackPosition = state.position;
+      function poll() {
+        progressTimer = null;
+        if (!current(t) || !wantedPlaying || suspended || !prepared || operation || ended ||
+            ownership.owner !== api) { return; }
+        // Do not call AVPlay during prepare/seek/restore or when native playback is paused.
+        if (nativeState() !== 'PLAYING' || buffering) { progressAt = progressClock(); }
+        else {
+          try {
+            var position = number(av.getCurrentTime(), -1);
+            if (position >= 0) {
+              noteProgress(position, false);
+              if (position > state.position) { time(position, state.duration); }
+            }
+          } catch (ignoreProgressRead) { /* Advancing callbacks still prove playback is healthy. */ }
+          if (progressClock() - progressAt >= WAIT_MS) {
+            rememberPosition();
+            if (progressConfirmed && !silentReopenUsed) {
+              // Close this stream before reopening the same pooled decoder. The peer stays playing.
+              silentReopenUsed = true; openSource(state.position);
+            } else { fail(t, 'The video stopped responding. Please retry or choose another channel.'); }
+            return;
+          }
+        }
+        if (current(t) && wantedPlaying && !suspended) { progressTimer = root.setTimeout(poll, PROGRESS_POLL_MS); }
+      }
+      progressTimer = root.setTimeout(poll, PROGRESS_POLL_MS);
     }
     function startWait(t) {
       if (watchdog !== null || !wantedPlaying || suspended || !current(t)) { return; }
@@ -127,6 +182,7 @@
     }
     function closeMedia() {
       clearWait();
+      clearProgress();
       if (av) {
         if (ownership.owner === api) {
           // close is legal in every AVPlay state and cancels pending preparation.
@@ -184,6 +240,7 @@
     function finish(t) {
       if (!current(t) || suspended || ended) { return; }
       clearWait();
+      clearProgress();
       if (state.request.live) {
         fail(t, 'The live stream ended. Choose another channel or retry.');
         return;
@@ -272,10 +329,12 @@
           if (s !== 'PLAYING') { av.play(); }
           applyTracks();
           emit(buffering ? 'loading' : 'playing');
+          startProgress(t);
         } else {
           if (s === 'READY') { av.play(); s = 'PLAYING'; }
           if (s === 'PLAYING') { av.pause(); }
           clearWait();
+          clearProgress();
           emit('paused');
         }
       } catch (error) { fail(t, friendlyError(error)); }
@@ -293,6 +352,7 @@
       if (!current(t)) { return; }
       if (operation || !prepared) { queuedSeek = position; return; }
       var target = boundPosition(position);
+      clearProgress();
       operation = 'seek';
       activeSeek = target;
       if (wantedPlaying) { emit('loading'); startWait(t); }
@@ -333,18 +393,21 @@
           onbufferingstart: function () {
             if (!current(t) || suspended) { return; }
             buffering = true;
+            clearProgress();
             emit(wantedPlaying ? 'loading' : 'paused'); startWait(t);
           },
           onbufferingprogress: function () { if (current(t)) { startWait(t); } },
           onbufferingcomplete: function () {
             if (!current(t) || suspended || !prepared || operation) { return; }
             buffering = false; clearWait(); emit(wantedPlaying ? 'playing' : 'paused');
+            startProgress(t);
           },
           oncurrentplaytime: function (position) {
             if (!current(t) || suspended || operation || !prepared) { return; }
-            if (number(position, 0) > state.position) { buffering = false; clearWait(); }
+            if (wantedPlaying) { noteProgress(Math.max(0, number(position, 0)), true); }
             time(position, state.duration);
             if (wantedPlaying && state.status !== 'playing') { emit('playing'); }
+            startProgress(t);
           },
           onstreamcompleted: function () { finish(t); },
           onerror: function (error) { if (!suspended) { fail(t, friendlyError(error)); } },
@@ -448,6 +511,7 @@
       trackCache = { audio: [], subtitles: [] };
       queuedTracks = {};
       ended = false;
+      progressConfirmed = false;
       state.position = state.request.live ? 0 : Math.max(0, number(position, 0));
       state.duration = 0;
       emit(wantedPlaying ? 'loading' : 'paused', '');
@@ -483,12 +547,14 @@
         if (url && sources.indexOf(url) === -1) { sources.push(url); }
       }
       sourceIndex = 0;
+      silentReopenUsed = false;
       openSource(request.startPosition || 0);
     };
     api.pause = function () {
       if (!state.request || state.status === 'error') { return; }
       wantedPlaying = false;
       clearWait();
+      clearProgress();
       if (!suspended && prepared && !operation) {
         if (av) { syncIntent(token); } else { video.pause(); }
       }
@@ -496,7 +562,7 @@
     };
     api.resume = function () {
       if (!state.request) { return; }
-      if (state.status === 'error') { sourceIndex = 0; wantedPlaying = true; openSource(state.position); return; }
+      if (state.status === 'error') { sourceIndex = 0; silentReopenUsed = false; wantedPlaying = true; openSource(state.position); return; }
       wantedPlaying = true;
       if (suspended) { return; }
       if (ended) { ended = false; api.seekTo(0); }
@@ -581,6 +647,7 @@
       suspended = true;
       if (ownership && ownership.owner === api) { ownership.audioActive = false; }
       clearWait();
+      clearProgress();
       if (av && prepared && !operation) {
         try { av.suspend(); nativeSuspended = true; }
         catch (ignore) { token += 1; closeMedia(); }

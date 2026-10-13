@@ -175,7 +175,7 @@ class MultiViewNavigationTest {
     }
 
     @OptIn(ExperimentalComposeUiApi::class)
-    private fun activeFixture(): AppState {
+    private fun activeFixture(status: TwoChannelPlayer.Status = TwoChannelPlayer.Status.PAUSED): AppState {
         val state = AppState().apply {
             tab = Tab.MULTIVIEW
             multiView.firstKey = channels[0].key
@@ -186,7 +186,7 @@ class MultiViewNavigationTest {
         // or making provider requests. The opt-in native fixture verifies decoded video.
         rule.runOnIdle {
             ReflectionHelpers.getStaticField<MutableStateFlow<List<TwoChannelPlayer.SlotState>>>(TwoChannelPlayer::class.java, "_states").value =
-                channels.take(2).map { TwoChannelPlayer.SlotState(it, TwoChannelPlayer.Status.PAUSED) }
+                channels.take(2).map { TwoChannelPlayer.SlotState(it, status) }
             ReflectionHelpers.getStaticField<MutableStateFlow<Boolean>>(TwoChannelPlayer::class.java, "_active").value = true
         }
         rule.setContent {
@@ -200,6 +200,40 @@ class MultiViewNavigationTest {
     }
 
     private fun nativeVideo(slot: Int) = rule.activity.window.decorView.findViewWithTag<PlayerView>("dual-native-video-$slot")
+
+    @OptIn(ExperimentalComposeUiApi::class)
+    @Test fun ongoingPlayingUpdatesDoNotResetTheControlsDeadline() {
+        val state = activeFixture(TwoChannelPlayer.Status.LOADING)
+        val first = checkNotNull(nativeVideo(0))
+        val second = checkNotNull(nativeVideo(1))
+        val states = ReflectionHelpers.getStaticField<MutableStateFlow<List<TwoChannelPlayer.SlotState>>>(TwoChannelPlayer::class.java, "_states")
+        // The real player's health loop publishes fresh positions every second.
+        // These updates must not act like remote input or reveal hidden controls.
+        repeat(4) { tick ->
+            rule.mainClock.advanceTimeBy(1_000)
+            rule.runOnIdle {
+                states.value = states.value.map { it.copy(status = TwoChannelPlayer.Status.PLAYING, positionMs = (tick + 1) * 1_000L) }
+                Snapshot.sendApplyNotifications()
+            }
+            advance()
+            rule.onNodeWithTag("dual-controls").assertExists()
+        }
+        rule.mainClock.advanceTimeBy(1_100)
+        advance()
+        rule.onNodeWithTag("dual-controls").assertDoesNotExist()
+        awaitTag("dual-pane-0", focused = true)
+        repeat(5) { tick ->
+            rule.mainClock.advanceTimeBy(1_000)
+            rule.runOnIdle {
+                states.value = states.value.map { it.copy(positionMs = (tick + 6) * 1_000L) }
+                Snapshot.sendApplyNotifications()
+            }
+            advance()
+            rule.onNodeWithTag("dual-layout").assertDoesNotExist()
+        }
+        assertSame(first, nativeVideo(0)); assertSame(second, nativeVideo(1))
+        rule.runOnIdle { assertTrue(TwoChannelPlayer.active.value); assertEquals(Tab.MULTIVIEW, state.tab) }
+    }
 
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     @OptIn(ExperimentalComposeUiApi::class)

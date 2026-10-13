@@ -25,7 +25,8 @@ function timers() {
       }
       now = end;
     },
-    get size() { return pending.size; }
+    get size() { return pending.size; },
+    get now() { return now; }
   };
 }
 
@@ -93,7 +94,8 @@ function avplay(audioGroup) {
     completeRestore() { busy = ''; state = saved; restores.at(-1).ok(); },
     failRestore() { busy = ''; restores.at(-1).error({ name: 'UnknownError' }); },
     event(name, ...args) { if (name === 'oncurrentplaytime') { currentTime = args[0]; } listener[name](...args); },
-    set duration(value) { duration = value; }
+    set duration(value) { duration = value; },
+    set clock(value) { currentTime = value; }
   };
   if (audioGroup) { audioGroup.push(av); }
   return av;
@@ -127,7 +129,7 @@ function harness(native = true) {
   const object = { style: {}, attributes: {}, setAttribute(key, value) { this.attributes[key] = value; } };
   const states = [], errors = [], times = [];
   let ended = 0;
-  const window = { setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout };
+  const window = { setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, performance: { now() { return clock.now; } } };
   if (av) { window.webapis = { avplay: av }; }
   vm.runInNewContext(source, { window }, { filename: 'player.js' });
   const player = window.TunerPlayer.create({ objectElement: object, videoElement: video,
@@ -147,7 +149,7 @@ test('native prepare, display rectangle and metadata follow legal AVPlay orderin
   assert.equal(h.player.state.status, 'playing');
   h.av.event('oncurrentplaytime', 1000);
   assert.equal(h.player.state.position, 1000);
-  assert.equal(h.clock.size, 0);
+  assert.equal(h.clock.size, 1, 'a low-frequency native progress monitor remains armed');
   assert.equal(h.player.tracks().audio[0].language, 'spa');
   assert.equal(h.player.tracks().audio.length, 2, 'unknown language is allowed');
   const opens = h.av.calls.filter(x => x[0] === 'open').length;
@@ -224,6 +226,69 @@ test('repeated zero playback timestamps do not hide an initial stall', () => {
   h.av.event('oncurrentplaytime', 0); h.clock.advance(15000);
   h.av.event('oncurrentplaytime', 0); h.clock.advance(15000);
   assert.equal(h.player.state.status, 'error');
+});
+
+test('silent PLAYING stalls reopen once, then use backups without an infinite retry loop', () => {
+  const h = harness();
+  h.player.play({ url: 'https://example.test/a.ts', backups: ['https://example.test/b.ts'], live: true });
+  h.av.completePrepare(); h.av.event('oncurrentplaytime', 60000);
+  const oldListener = h.av.prepares[0].listener;
+  h.clock.advance(35000);
+  assert.equal(h.av.prepares.length, 2);
+  assert.equal(h.av.prepares[1].url, 'https://example.test/a.ts', 'recover the currently chosen source once');
+  assert.equal(h.player.state.status, 'loading');
+  oldListener.onerror('PLAYER_ERROR_CONNECTION_FAILED');
+  assert.equal(h.av.prepares.length, 2, 'retired callbacks cannot fail the recovery');
+  h.av.completePrepare(); h.av.event('oncurrentplaytime', 1000); h.clock.advance(35000);
+  assert.equal(h.av.prepares.length, 3);
+  assert.equal(h.av.prepares[2].url, 'https://example.test/b.ts');
+  h.av.completePrepare(); h.av.event('oncurrentplaytime', 1000); h.clock.advance(35000);
+  assert.equal(h.player.state.status, 'error'); assert.equal(h.av.getState(), 'NONE');
+  assert.equal(h.clock.size, 0);
+  assert.match(h.errors.at(-1), /stopped responding/);
+  assert.ok(!h.errors.at(-1).includes('example.test'));
+  h.clock.advance(120000); assert.equal(h.av.prepares.length, 3);
+});
+
+test('readable advancing native clocks keep playback healthy when callbacks disappear', () => {
+  const h = harness(); h.player.play({ url: 'https://example.test/live.ts', live: true }); h.av.completePrepare();
+  for (let i = 1; i <= 20; i++) { h.av.clock = i * 5000; h.clock.advance(5000); }
+  assert.equal(h.av.prepares.length, 1); assert.equal(h.player.state.status, 'playing');
+  assert.equal(h.player.state.position, 100000); assert.deepEqual(h.times.at(-1), [100000, 90000]);
+  assert.equal(h.errors.length, 0);
+  h.player.stop(); assert.equal(h.clock.size, 0);
+});
+
+test('advancing callbacks remain valid when this SDK cannot read its playback clock', () => {
+  const h = harness(); h.player.play({ url: 'https://example.test/live.ts', live: true }); h.av.completePrepare();
+  h.av.getCurrentTime = () => { throw { name: 'NotSupportedError' }; };
+  for (let i = 1; i <= 20; i++) { h.av.event('oncurrentplaytime', i * 5000); h.clock.advance(5000); }
+  assert.equal(h.av.prepares.length, 1); assert.equal(h.player.state.status, 'playing');
+  assert.equal(h.errors.length, 0);
+});
+
+test('native progress polling stops for deliberate pause, async seek, suspension and restore', () => {
+  const h = harness(); h.player.play({ url: 'https://example.test/film.mp4' }); h.av.completePrepare(); h.av.event('oncurrentplaytime', 1000);
+  h.player.pause(); const pausedReads = h.av.calls.filter(call => call[0] === 'getCurrentTime').length;
+  h.clock.advance(120000); assert.equal(h.av.calls.filter(call => call[0] === 'getCurrentTime').length, pausedReads);
+  assert.equal(h.clock.size, 0); assert.equal(h.av.prepares.length, 1);
+  h.player.resume(); h.av.event('oncurrentplaytime', 2000); h.player.seekTo(20000);
+  const seekingReads = h.av.calls.filter(call => call[0] === 'getCurrentTime').length;
+  h.clock.advance(20000); assert.equal(h.av.calls.filter(call => call[0] === 'getCurrentTime').length, seekingReads);
+  h.av.completeSeek(); h.av.event('oncurrentplaytime', 21000);
+  h.player.suspend(); const suspendedReads = h.av.calls.filter(call => call[0] === 'getCurrentTime').length;
+  h.clock.advance(120000); assert.equal(h.av.calls.filter(call => call[0] === 'getCurrentTime').length, suspendedReads);
+  h.player.restore(); h.clock.advance(20000);
+  assert.equal(h.av.calls.filter(call => call[0] === 'getCurrentTime').length, suspendedReads);
+  h.av.completeRestore(); h.av.clock = 22000; h.clock.advance(5000);
+  assert.equal(h.av.prepares.length, 1); assert.equal(h.errors.length, 0);
+});
+
+test('silent VOD recovery seeks to the saved position instead of restarting the movie', () => {
+  const h = harness(); h.player.play({ url: 'https://example.test/film.mp4' }); h.av.completePrepare(); h.av.event('oncurrentplaytime', 23000);
+  h.clock.advance(35000); assert.equal(h.av.prepares.length, 2);
+  h.av.completePrepare(); assert.equal(h.av.seeks.at(-1).ms, 23000);
+  h.av.completeSeek(); assert.equal(h.player.state.status, 'playing'); assert.equal(h.player.state.position, 23000);
 });
 
 test('seek coalesces remote repeats and delays pause and layout calls until completion', () => {
@@ -353,6 +418,41 @@ function dualHarness(version = '8.0') {
   }
   return { ...h, managers, objects, states, makeDual, get allocated() { return allocated; } };
 }
+
+test('a silently frozen muted sub recovers alone while the healthy peer and audio stay unchanged', () => {
+  const h = dualHarness(), dual = h.makeDual();
+  dual.play(0, { url: 'https://example.test/main.ts', live: true });
+  dual.play(1, { url: 'https://example.test/sub.ts', live: true });
+  h.managers.forEach(manager => manager.completePrepare());
+  h.managers[0].event('oncurrentplaytime', 60000); h.managers[1].event('oncurrentplaytime', 60000);
+  const healthyCloses = h.managers[0].calls.filter(call => call[0] === 'close').length;
+  for (let i = 1; i <= 7; i++) { h.managers[0].clock = 60000 + i * 5000; h.clock.advance(5000); }
+  assert.equal(h.managers[0].prepares.length, 1);
+  assert.equal(h.managers[0].calls.filter(call => call[0] === 'close').length, healthyCloses);
+  assert.equal(h.managers[0].getState(), 'PLAYING'); assert.equal(h.managers[0].getCurrentTime(), 95000);
+  assert.equal(h.managers[1].prepares.length, 2); assert.equal(h.managers[1].prepares.at(-1).url, 'https://example.test/sub.ts');
+  assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false);
+  h.managers[1].completePrepare(); h.managers[1].event('oncurrentplaytime', 1000);
+  assert.equal(h.managers[1].getState(), 'PLAYING'); assert.equal(h.allocated, 2);
+  assert.equal(h.av.getState(), 'NONE', 'ordinary playback stays closed');
+  assert.equal(h.states.filter(entry => entry.state.status === 'error').length, 0);
+  dual.stop(); assert.equal(h.clock.size, 0);
+});
+
+test('muted dual streams with missing callbacks stay healthy if native clocks still advance', () => {
+  const h = dualHarness(), dual = h.makeDual();
+  dual.play(0, { url: 'https://example.test/main.ts', live: true }); dual.play(1, { url: 'https://example.test/sub.ts', live: true });
+  h.managers.forEach(manager => manager.completePrepare());
+  for (let i = 1; i <= 20; i++) {
+    h.managers[0].clock = i * 5000; h.managers[1].clock = i * 5000;
+    if (i === 6) dual.selectAudio(1); if (i === 12) dual.selectAudio(0);
+    h.clock.advance(5000);
+  }
+  assert.deepEqual(h.managers.map(manager => manager.prepares.length), [1, 1]);
+  assert.equal(h.managers[0].audioEnabled, true); assert.equal(h.managers[1].audioEnabled, false);
+  assert.equal(h.states.filter(entry => entry.state.status === 'error').length, 0);
+  assert.equal(h.allocated, 2);
+});
 
 test('native dual view prepares two independent main/sub players and changes audio without reconnecting', () => {
   const h = dualHarness(), dual = h.makeDual();

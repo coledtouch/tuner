@@ -4,7 +4,9 @@ import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Context
 import android.content.Intent
 import android.graphics.Rect
+import android.graphics.Bitmap
 import android.graphics.SurfaceTexture
+import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.view.KeyEvent
@@ -46,6 +48,7 @@ import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.Closeable
+import java.io.File
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -182,6 +185,9 @@ class MultiViewFullscreenTest {
                 assertNull("Returning to the fixture guide opened an ordinary stream", onMain { PlayerHolder.currentUrl })
                 onMain { saved.assertUnchanged() }
                 status("back-released", viewport, emptyList())
+            } catch (failure: Throwable) {
+                captureFailure()
+                throw failure
             } finally {
                 try {
                     onMain {
@@ -250,6 +256,14 @@ class MultiViewFullscreenTest {
             } finally { @Suppress("DEPRECATION") node.recycle() }
         }
         val automation = instrumentation.uiAutomation
+        val required = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+        val service = automation.serviceInfo
+        if ((service.flags and required) != required) {
+            service.flags = service.flags or required
+            automation.serviceInfo = service
+        }
+        // Public UiAutomation.clearCache was added in API 34; the onn test target is API 34.
+        if (Build.VERSION.SDK_INT >= 34) automation.clearCache()
         val targetPackage = instrumentation.targetContext.packageName
         val windows = automation.windows.sortedWith(compareByDescending<AccessibilityWindowInfo> { it.isFocused }
             .thenByDescending { it.isActive }.thenByDescending { it.layer })
@@ -305,6 +319,19 @@ class MultiViewFullscreenTest {
     }
     private fun status(stage: String, viewport: Rect, videos: List<Rect>) {
         instrumentation.sendStatus(2, Bundle().apply { putString("stream", "MULTIVIEW_FULLSCREEN stage=$stage viewport=$viewport videos=$videos\n") })
+    }
+    private fun captureFailure() {
+        runCatching {
+            val frame = requireNotNull(instrumentation.uiAutomation.takeScreenshot()) { "Screenshot unavailable" }
+            try {
+                val directory = instrumentation.context.getExternalFilesDir(null) ?: instrumentation.context.filesDir
+                directory.mkdirs()
+                val destination = File(directory, "fullscreen-failure.png")
+                destination.outputStream().use { output -> check(frame.compress(Bitmap.CompressFormat.PNG, 100, output)) }
+                println("MultiViewFullscreenTest failure screenshot=${destination.absolutePath}")
+                instrumentation.sendStatus(2, Bundle().apply { putString("stream", "MULTIVIEW_FULLSCREEN failureScreenshot=${destination.absolutePath}\n") })
+            } finally { frame.recycle() }
+        }.onFailure { println("MultiViewFullscreenTest failure screenshot unavailable: ${it.javaClass.simpleName}") }
     }
     private inner class SavedState {
         private val channels = Repo.channels.value
