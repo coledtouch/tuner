@@ -30,7 +30,7 @@ object FreeEpg {
         Region("DISTROTV1", "DistroTV", "0.1 MB"),
     )
 
-    val defaults = listOf("US2", "US_SPORTS1", "CA2", "UK1")
+    val defaults = listOf("US2", "US_SPORTS1")
 
     fun url(code: String) = "https://epgshare01.online/epgshare01/epg_ripper_$code.xml.gz"
 }

@@ -29,6 +29,10 @@ data class Channel(
     val url: String,
     /** Every category the provider lists this channel under (Xtream can repeat items per category). */
     val categoryIds: List<String> = listOf(categoryId),
+    val country: String? = null,
+    val language: String? = null,
+    /** Other copies of this channel from the provider, tried in order when [url] doesn't play. */
+    val backups: List<String> = emptyList(),
 )
 
 data class Movie(
@@ -40,6 +44,10 @@ data class Movie(
     val url: String,
     val added: Long = 0,
     val categoryIds: List<String> = listOf(categoryId),
+    val country: String? = null,
+    val language: String? = null,
+    /** Other provider uploads of this film, tried if the primary upload cannot play. */
+    val backups: List<String> = emptyList(),
 )
 
 data class Series(
@@ -54,6 +62,8 @@ data class Series(
     val backdrop: String?,
     val added: Long = 0,
     val categoryIds: List<String> = listOf(categoryId),
+    val country: String? = null,
+    val language: String? = null,
 )
 
 data class Episode(
@@ -110,6 +120,8 @@ sealed interface PlayRequest {
         val url: String,
         val startMs: Long,
         val queue: List<Vod> = emptyList(),
+        val requireEnglishAudio: Boolean = false,
+        val streamBackups: List<String> = emptyList(),
     ) : PlayRequest
 }
 

@@ -54,6 +54,8 @@ object M3u {
                             movies += Movie(
                                 id = "mu:" + url.hashCode().toUInt().toString(36),
                                 name = name, poster = logo, rating = null, categoryId = cat.id, url = url,
+                                country = attrs["tvg-country"]?.ifBlank { null } ?: attrs["country"]?.ifBlank { null },
+                                language = attrs["tvg-language"]?.ifBlank { null } ?: attrs["language"]?.ifBlank { null },
                             )
                         } else {
                             val cat = liveCats.getOrPut(group) { Category("g${liveCats.size}", group) }
@@ -67,6 +69,8 @@ object M3u {
                                 epgId = attrs["tvg-id"]?.ifBlank { null } ?: attrs["tvg-name"]?.ifBlank { null },
                                 streamId = null,
                                 url = url,
+                                country = attrs["tvg-country"]?.ifBlank { null } ?: attrs["country"]?.ifBlank { null },
+                                language = attrs["tvg-language"]?.ifBlank { null } ?: attrs["language"]?.ifBlank { null },
                             )
                         }
                         attrs = emptyMap(); title = null; groupOverride = null

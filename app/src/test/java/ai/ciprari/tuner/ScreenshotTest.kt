@@ -1,17 +1,23 @@
 package ai.ciprari.tuner
 
 import android.graphics.Bitmap
-import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
-import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.core.view.drawToBitmap
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.pressKey
+import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.isDialog
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.assertIsFocused
+import androidx.compose.ui.test.performSemanticsAction
+import androidx.compose.ui.semantics.SemanticsActions
 import ai.ciprari.tuner.data.Category
 import ai.ciprari.tuner.data.Channel
 import ai.ciprari.tuner.data.Movie
@@ -19,6 +25,7 @@ import ai.ciprari.tuner.data.Program
 import ai.ciprari.tuner.data.Repo
 import ai.ciprari.tuner.data.Source
 import ai.ciprari.tuner.data.SourceType
+import ai.ciprari.tuner.data.Series
 import ai.ciprari.tuner.ui.AppState
 import ai.ciprari.tuner.ui.HomeScreen
 import ai.ciprari.tuner.ui.Tab
@@ -27,6 +34,9 @@ import ai.ciprari.tuner.ui.floor30
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
@@ -42,10 +52,30 @@ class ScreenshotTest {
     private val out = File(System.getProperty("user.dir"), "build/screens").apply { mkdirs() }
 
     private fun shot(name: String) {
+        rule.runOnIdle { androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications() }
         repeat(3) { rule.mainClock.advanceTimeByFrame() }
         rule.waitForIdle()
-        val bmp = rule.activity.window.decorView.rootView.drawToBitmap()
+        org.robolectric.shadows.ShadowLooper.idleMainLooper()
+        repeat(3) { rule.mainClock.advanceTimeByFrame() }
+        rule.waitForIdle()
+        val dialog = org.robolectric.shadows.ShadowDialog.getLatestDialog()
+        val view = if (dialog?.isShowing == true) dialog.window!!.decorView else rule.activity.window.decorView.rootView
+        // Draw the active window directly; PixelCopy is unavailable in Robolectric.
+        view.measure(android.view.View.MeasureSpec.makeMeasureSpec(view.width, android.view.View.MeasureSpec.EXACTLY), android.view.View.MeasureSpec.makeMeasureSpec(view.height, android.view.View.MeasureSpec.EXACTLY))
+        view.layout(0, 0, view.width, view.height)
+        val bmp = view.drawToBitmap()
         File(out, "$name.png").outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+    }
+
+    private fun awaitBrowse(state: AppState) {
+        val prefix = if (state.tab == Tab.MOVIES) "movies" else "series"
+        rule.waitUntil(timeoutMillis = 5_000) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            rule.runOnIdle { androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications() }
+            rule.mainClock.advanceTimeByFrame()
+            rule.onAllNodesWithTag("browse-content:$prefix").fetchSemanticsNodes().isNotEmpty() &&
+                !state.restoreFocus && state.lastFocusedKey?.startsWith("$prefix:") == true
+        }
     }
 
     /** TV remotes put Compose in keyboard input mode; tests start in touch mode. */
@@ -64,6 +94,13 @@ class ScreenshotTest {
         Repo.prefs.saveSource(Source("s1", "Test", SourceType.XTREAM, "http://h", "u", "p"))
         Repo.prefs.setActive("s1")
         Repo.prefs.guidePreview = false
+        Repo.prefs.lastChannelKey = null
+        ai.ciprari.tuner.ui.Toasts.message = null
+        ai.ciprari.tuner.ui.Palette.theme = ai.ciprari.tuner.ui.Themes.Midnight
+        Repo.trending.value = emptyList()
+        Repo.liveStatus.value = ai.ciprari.tuner.data.LoadStatus.Ready
+        Repo.vodStatus.value = ai.ciprari.tuner.data.LoadStatus.Ready
+        Repo.seriesStatus.value = ai.ciprari.tuner.data.LoadStatus.Ready
         val cats = listOf(Category("1", "News"), Category("2", "Sports"), Category("3", "Entertainment"), Category("4", "Kids"), Category("5", "Movies"))
         val names = listOf("CNN", "ESPN", "HBO", "NBC", "FOX", "ABC", "CBS", "AMC", "TNT", "TBS", "FX", "Nickelodeon", "Disney", "Food Network", "HGTV", "Discovery", "History", "Bravo")
         val chans = names.mapIndexed { i, n ->
@@ -90,6 +127,11 @@ class ScreenshotTest {
         Repo.putPrograms(data)
         Repo.movies.value = (1..30).map { Movie("m:$it", "Movie Title $it", null, "7.${it % 10}", (it % 3 + 1).toString(), "http://h/movie/u/p/$it.mp4", it.toLong(), categoryIds = listOf("1", "2", "3")) }
         Repo.movieCategories.value = listOf(Category("1", "Action"), Category("2", "Comedy"), Category("3", "Drama"))
+        val shows = listOf("The Last Horizon", "City After Dark", "Wild America", "The Long Way Home", "North Shore", "Second Chances")
+        Repo.series.value = shows.mapIndexed { i, title ->
+            Series("${i + 1}", title, null, "A new story unfolds with every episode. Discover the people, places and moments that bring it to life.", "8.${i % 5}", "1", "Drama", "2026", null, (i + 1).toLong())
+        }
+        Repo.seriesCategories.value = listOf(Category("1", "English · Drama"))
     }
 
     @OptIn(ExperimentalTestApi::class)
@@ -101,15 +143,31 @@ class ScreenshotTest {
         shot("01_guide")
         rule.onRoot().performKeyInput { repeat(3) { pressKey(Key.DirectionDown) } }
         rule.mainClock.advanceTimeBy(600)
+        rule.runOnIdle { assertEquals(3, state.guide.row) }
         shot("02_guide_down3")
         rule.onRoot().performKeyInput { repeat(4) { pressKey(Key.DirectionRight) } }
         rule.mainClock.advanceTimeBy(600)
         shot("03_guide_right4")
         rule.onRoot().performKeyInput { pressKey(Key.Enter) }
+        rule.runOnIdle { androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications() }
         rule.mainClock.advanceTimeBy(600)
+        rule.waitForIdle()
+        org.robolectric.shadows.ShadowLooper.idleMainLooper()
+        repeat(3) { rule.mainClock.advanceTimeByFrame() }
+        rule.waitForIdle()
+        rule.onNodeWithText("Watch channel now").assertExists()
+        rule.runOnIdle {
+            // Robolectric does not deliver the window-focus event Android sends to a modal.
+            val dialog = checkNotNull(org.robolectric.shadows.ShadowDialog.getLatestDialog()) { "Future program dialog was not created" }
+            dialog.window!!.decorView.dispatchWindowFocusChanged(true)
+            androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+        }
+        rule.onNodeWithText("Watch channel now").performSemanticsAction(SemanticsActions.RequestFocus) { it() }
+        rule.onNodeWithText("Watch channel now").assertIsFocused()
         shot("04_future_details")
         println("stackA=" + state.stack.size)
-        rule.onRoot().performKeyInput { pressKey(Key.DirectionRight); pressKey(Key.Enter) }
+        rule.onNode(isDialog()).performKeyInput { pressKey(Key.DirectionRight); pressKey(Key.Enter) }
+        rule.runOnIdle { androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications() }
         rule.mainClock.advanceTimeBy(600)
         rule.onRoot().performKeyInput { repeat(10) { pressKey(Key.DirectionDown) }; pressKey(Key.DirectionLeft) }
         rule.mainClock.advanceTimeBy(600)
@@ -122,7 +180,139 @@ class ScreenshotTest {
         rule.mainClock.autoAdvance = false
         rule.setContent { KeyboardMode { TunerTheme { HomeScreen(state) } } }
         rule.mainClock.advanceTimeBy(800)
+        awaitBrowse(state)
         shot("06_movies")
+    }
+
+    @Test fun series() {
+        val state = AppState().apply { tab = Tab.SERIES }
+        rule.mainClock.autoAdvance = false
+        rule.setContent { KeyboardMode { TunerTheme { HomeScreen(state) } } }
+        rule.mainClock.advanceTimeBy(800)
+        awaitBrowse(state)
+        shot("15_series")
+    }
+
+    @Config(sdk = [34], qualifiers = "w720dp-h405dp-land-xhdpi")
+    @Test fun compactGuideAndLibraries() {
+        val state = AppState()
+        rule.mainClock.autoAdvance = false
+        rule.setContent { KeyboardMode { TunerTheme { HomeScreen(state) } } }
+        rule.mainClock.advanceTimeBy(800)
+        shot("16_compact_guide")
+        rule.runOnIdle { state.tab = Tab.MOVIES; state.restoreFocus = true; androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications() }
+        rule.mainClock.advanceTimeBy(800)
+        awaitBrowse(state)
+        shot("17_compact_movies")
+        rule.runOnIdle { state.tab = Tab.SERIES; state.restoreFocus = true; androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications() }
+        rule.mainClock.advanceTimeBy(800)
+        awaitBrowse(state)
+        shot("18_compact_series")
+    }
+
+    /** Passing across navigation must not mount each library or steal remote focus. */
+    @Test fun navigationRequiresSelection() {
+        val state = AppState()
+        rule.mainClock.autoAdvance = false
+        rule.setContent { KeyboardMode { TunerTheme { HomeScreen(state) } } }
+        rule.mainClock.advanceTimeBy(800)
+        rule.onNodeWithContentDescription("Movies").performSemanticsAction(SemanticsActions.RequestFocus) { it() }
+        rule.onRoot().performKeyInput { pressKey(Key.DirectionRight) }
+        rule.mainClock.advanceTimeBy(300)
+        rule.onNodeWithContentDescription("Series").assertIsFocused()
+        rule.runOnIdle { assertEquals(Tab.GUIDE, state.tab) }
+        rule.onRoot().performKeyInput { pressKey(Key.Enter) }
+        rule.mainClock.advanceTimeBy(800)
+        rule.runOnIdle { assertEquals(Tab.SERIES, state.tab) }
+        awaitBrowse(state)
+        shot("19_navigation_series")
+    }
+
+    @Test fun movieReturnRestoresRemoteFocus() {
+        val state = AppState().apply { tab = Tab.MOVIES }
+        rule.mainClock.autoAdvance = false
+        rule.setContent {
+            KeyboardMode {
+                TunerTheme {
+                    if (state.top == ai.ciprari.tuner.ui.Screen.Home) HomeScreen(state)
+                    else androidx.compose.material3.Text("Detail destination")
+                }
+            }
+        }
+        rule.mainClock.advanceTimeBy(800)
+        awaitBrowse(state)
+        rule.onRoot().performKeyInput { repeat(4) { pressKey(Key.DirectionRight) } }
+        rule.mainClock.advanceTimeBy(500)
+        var expected = ""
+        rule.runOnIdle { expected = state.lastFocusedKey!! }
+        rule.onRoot().performKeyInput { pressKey(Key.Enter) }
+        rule.mainClock.advanceTimeBy(400)
+        rule.runOnIdle {
+            assertTrue(state.top is ai.ciprari.tuner.ui.Screen.MovieDetail)
+            state.pop()
+            androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+        }
+        rule.mainClock.advanceTimeBy(800)
+        awaitBrowse(state)
+        rule.runOnIdle {
+            assertEquals(expected, state.lastFocusedKey)
+            assertFalse("Returning should restore an attached card's remote focus", state.restoreFocus)
+        }
+        awaitBrowse(state)
+        shot("20_movie_focus_restored")
+    }
+
+    @Test fun guideFilterReturnsFutureWindowToNow() {
+        val state = AppState()
+        state.guide.windowStart = floor30(System.currentTimeMillis()) + 4 * 3600_000L
+        state.guide.focusTime = state.guide.windowStart
+        rule.mainClock.autoAdvance = false
+        rule.setContent { KeyboardMode { TunerTheme { HomeScreen(state) } } }
+        rule.mainClock.advanceTimeBy(800)
+        rule.onNodeWithText("Sports").performClick()
+        rule.mainClock.advanceTimeBy(500)
+        rule.runOnIdle {
+            assertEquals("2", state.guide.category)
+            assertEquals(0, state.guide.row)
+            assertEquals(0L, state.guide.focusTime)
+            assertTrue(state.guide.windowStart <= floor30(System.currentTimeMillis()))
+        }
+    }
+
+    @Test fun backLeavesDeepGuideWithoutLosingChannel() {
+        val state = AppState()
+        rule.mainClock.autoAdvance = false
+        rule.setContent { KeyboardMode { TunerTheme { HomeScreen(state) } } }
+        rule.mainClock.advanceTimeBy(800)
+        rule.onRoot().performKeyInput { repeat(10) { pressKey(Key.DirectionDown) } }
+        rule.mainClock.advanceTimeBy(700)
+        rule.runOnIdle {
+            assertEquals(10, state.guide.row)
+            rule.activity.onBackPressedDispatcher.onBackPressed()
+            androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+        }
+        rule.mainClock.advanceTimeBy(300)
+        rule.waitForIdle()
+        org.robolectric.shadows.ShadowLooper.idleMainLooper()
+        repeat(3) { rule.mainClock.advanceTimeByFrame() }
+        rule.onNodeWithContentDescription(Tab.GUIDE.title).assertIsFocused()
+        rule.onRoot().performKeyInput { pressKey(Key.DirectionRight) }
+        rule.mainClock.advanceTimeBy(300)
+        rule.onNodeWithContentDescription(Tab.MOVIES.title).assertIsFocused()
+        rule.runOnIdle {
+            assertEquals(10, state.guide.row)
+            assertEquals("Remote focus should leave the schedule on Back", 0L, state.guide.focusTime)
+        }
+    }
+
+    @Config(sdk = [34], qualifiers = "w640dp-h360dp-land-xhdpi")
+    @Test fun smallLandscapeMovies() {
+        val state = AppState().apply { tab = Tab.MOVIES }
+        rule.mainClock.autoAdvance = false
+        rule.setContent { KeyboardMode { TunerTheme { HomeScreen(state) } } }
+        rule.mainClock.advanceTimeBy(800)
+        awaitBrowse(state)
+        shot("21_small_movies")
     }
 
     @Test fun livePlayer() {

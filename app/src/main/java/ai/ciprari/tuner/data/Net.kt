@@ -3,9 +3,14 @@ package ai.ciprari.tuner.data
 import android.util.JsonReader
 import android.util.JsonToken
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.IOException
@@ -13,6 +18,8 @@ import java.io.InputStream
 import java.io.InputStreamReader
 import java.util.concurrent.TimeUnit
 import java.util.zip.GZIPInputStream
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 const val DEFAULT_UA = "VLC/3.0.21 LibVLC/3.0.21"
 
@@ -27,12 +34,29 @@ object Net {
 
     fun request(url: String, ua: String) = Request.Builder().url(url).header("User-Agent", ua.ifBlank { DEFAULT_UA }).build()
 
-    suspend fun getString(url: String, ua: String): String = withContext(Dispatchers.IO) {
-        client.newCall(request(url, ua)).execute().use { r ->
-            if (!r.isSuccessful) throw IOException("Server returned ${r.code}")
-            r.body?.string() ?: ""
-        }
+    /** Cancelling a screen/reload also closes its socket and interrupts response-body reads. */
+    private suspend fun <T> read(url: String, ua: String, body: (Response, Call) -> T): T = suspendCancellableCoroutine { continuation ->
+        val call = client.newCall(request(url, ua))
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (continuation.isActive) continuation.resumeWithException(e)
+            }
+            override fun onResponse(call: Call, response: Response) {
+                response.use {
+                    try {
+                        if (!it.isSuccessful) throw IOException("Server returned ${it.code}")
+                        val result = body(it, call)
+                        if (continuation.isActive) continuation.resume(result)
+                    } catch (e: Exception) {
+                        if (continuation.isActive) continuation.resumeWithException(e)
+                    }
+                }
+            }
+        })
     }
+
+    suspend fun getString(url: String, ua: String): String = read(url, ua) { r, _ -> r.body?.string() ?: "" }
 
     /**
      * Downloads [url] into [file], reusing the existing copy when it is younger than [maxAgeMs].
@@ -44,15 +68,21 @@ object Net {
                 System.currentTimeMillis() - file.lastModified() < maxAgeMs
             ) return@withContext file
             file.parentFile?.mkdirs()
-            val tmp = File(file.parentFile, file.name + ".part")
+            // Cancelled requests can finish unwinding while a replacement starts. Each owns its temp file.
+            val tmp = File.createTempFile(file.name.padEnd(3, '_'), ".part", file.parentFile)
             try {
-                client.newCall(request(url, ua)).execute().use { r ->
-                    if (!r.isSuccessful) throw IOException("Server returned ${r.code}")
+                read(url, ua) { r, call ->
                     val body = r.body ?: throw IOException("Empty response")
-                    tmp.outputStream().use { out -> body.byteStream().copyTo(out, 64 * 1024) }
+                    try {
+                        tmp.outputStream().use { out -> body.byteStream().copyTo(out, 64 * 1024) }
+                        if (call.isCanceled()) throw CancellationException("Download cancelled")
+                        if (!tmp.renameTo(file)) { tmp.copyTo(file, overwrite = true); tmp.delete() }
+                        file
+                    } finally { tmp.delete() }
                 }
-                if (!tmp.renameTo(file)) { tmp.copyTo(file, overwrite = true); tmp.delete() }
-                file
+            } catch (e: CancellationException) {
+                tmp.delete()
+                throw e
             } catch (e: Exception) {
                 tmp.delete()
                 // A stale cache beats nothing when the provider is flaky.
@@ -92,15 +122,17 @@ fun JsonReader.readAny(): Any? = when (peek()) {
  * Streams a JSON file whose top level is either an array of objects or an object of objects
  * (some panels return the latter) and hands each object to [fn] without holding the whole list.
  */
-fun forEachJsonObject(file: File, fn: (JMap) -> Unit) {
+fun forEachJsonObject(file: File, fn: (JMap) -> Unit) = forEachJsonObject(file, null, fn)
+
+/** Catalogues need a small subset of fields; skip provider extras without allocating their trees. */
+fun forEachJsonObject(file: File, fields: Set<String>?, fn: (JMap) -> Unit) {
     JsonReader(InputStreamReader(Net.openMaybeGzip(file), Charsets.UTF_8)).use { r ->
         r.isLenient = true
         when (r.peek()) {
             JsonToken.BEGIN_ARRAY -> {
                 r.beginArray()
                 while (r.hasNext()) {
-                    @Suppress("UNCHECKED_CAST")
-                    if (r.peek() == JsonToken.BEGIN_OBJECT) fn(r.readAny() as JMap) else r.skipValue()
+                    if (r.peek() == JsonToken.BEGIN_OBJECT) fn(r.readFields(fields)) else r.skipValue()
                 }
                 r.endArray()
             }
@@ -108,14 +140,28 @@ fun forEachJsonObject(file: File, fn: (JMap) -> Unit) {
                 r.beginObject()
                 while (r.hasNext()) {
                     r.nextName()
-                    @Suppress("UNCHECKED_CAST")
-                    if (r.peek() == JsonToken.BEGIN_OBJECT) fn(r.readAny() as JMap) else r.skipValue()
+                    if (r.peek() == JsonToken.BEGIN_OBJECT) fn(r.readFields(fields)) else r.skipValue()
                 }
                 r.endObject()
             }
             else -> Unit
         }
     }
+}
+
+private fun JsonReader.readFields(fields: Set<String>?): JMap {
+    if (fields == null) {
+        @Suppress("UNCHECKED_CAST")
+        return readAny() as JMap
+    }
+    val result = LinkedHashMap<String, Any?>()
+    beginObject()
+    while (hasNext()) {
+        val key = nextName()
+        if (key in fields) result[key] = readAny() else skipValue()
+    }
+    endObject()
+    return result
 }
 
 fun parseJson(text: String): Any? = JsonReader(text.reader()).use { it.isLenient = true; it.readAny() }
